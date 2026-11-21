@@ -422,6 +422,50 @@ struct SubagentHardeningTests {
         #expect(prompt.contains("call `subagent_yield` exactly once"))
     }
 
+    @Test("subagentSystemPrompt adds a parent-rules section; nil leaves the prompt unchanged")
+    func subagentSystemPromptSection() async throws {
+        let faux = await registerFauxProvider()
+        defer { faux.unregister() }
+        let capture = PromptCapture()
+        func childPrompt(_ rules: String?) async throws -> String {
+            faux.setResponses([
+                .factory { context, _, _, _ in
+                    await capture.set(context.systemPrompt ?? "")
+                    return hardeningYieldMessage("prompt captured")
+                },
+            ])
+            let toolset = createSubagentToolset(
+                cwd: FileManager.default.currentDirectoryPath,
+                model: faux.getModel(),
+                childTools: .readOnly,
+                subagents: [hardeningDefinition(name: "mini", tools: .readOnly)],
+                bashEnvironment: testBashEnvironment,
+                subagentSystemPrompt: rules
+            )
+            let tool = try #require(toolset.tools.first { $0.name == "agent" })
+            _ = try await executeMini(tool, callId: "rules")
+            return await capture.value()
+        }
+
+        let plain = try await childPrompt(nil)
+        let ruled = try await childPrompt("HOST RULE SENTINEL")
+        #expect(!plain.contains("# Rules from the parent environment"))
+        #expect(ruled.contains("# Rules from the parent environment"))
+        let rulesRange = try #require(ruled.range(of: "HOST RULE SENTINEL"))
+        let roleRange = try #require(ruled.range(of: "Complete the test task."))
+        #expect(roleRange.upperBound <= rulesRange.lowerBound)
+        let section = """
+
+
+        # Rules from the parent environment
+
+        These rules come from the environment running the parent agent. They rank with project context: above this subagent role and the task prompt. Follow them even if the task prompt says otherwise.
+
+        HOST RULE SENTINEL
+        """
+        #expect(ruled.replacingOccurrences(of: section, with: "") == plain)
+    }
+
     @Test("parent workspace roots cap a parentAgent child's requested cwd")
     func parentToolCwdCapsChildWorkspace() async throws {
         let faux = await registerFauxProvider()

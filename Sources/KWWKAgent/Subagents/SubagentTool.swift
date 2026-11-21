@@ -141,6 +141,8 @@ internal struct SubagentParentSnapshot: Sendable {
     var allowedModelOverrides: [Model]
     /// The parent's deferred tools; children that may mutate inherit them.
     var toolCatalog: ToolCatalog?
+    /// Host rules added to every subagent's system prompt.
+    var subagentSystemPrompt: String?
 }
 
 internal final class SubagentParentBox: @unchecked Sendable {
@@ -165,6 +167,7 @@ internal final class SubagentParentBox: @unchecked Sendable {
     private let availableSkills: [Skill]
     private let fallbackFileAccessPolicy: FileAccessPolicy
     private let allowedModelOverrides: [Model]
+    private let subagentSystemPrompt: String?
 
     init(
         childCwd: String,
@@ -182,7 +185,8 @@ internal final class SubagentParentBox: @unchecked Sendable {
         projectContextFiles: [(path: String, content: String)],
         availableSkills: [Skill],
         fallbackFileAccessPolicy: FileAccessPolicy,
-        allowedModelOverrides: [Model]
+        allowedModelOverrides: [Model],
+        subagentSystemPrompt: String? = nil
     ) {
         self.childCwd = childCwd
         self.fallbackModel = fallbackModel
@@ -200,6 +204,7 @@ internal final class SubagentParentBox: @unchecked Sendable {
         self.availableSkills = availableSkills
         self.fallbackFileAccessPolicy = fallbackFileAccessPolicy
         self.allowedModelOverrides = allowedModelOverrides
+        self.subagentSystemPrompt = subagentSystemPrompt
     }
 
     func attach(_ agent: Agent) {
@@ -225,7 +230,8 @@ internal final class SubagentParentBox: @unchecked Sendable {
                     availableSkills: availableSkills,
                     fileAccessPolicy: fallbackFileAccessPolicy,
                     allowedModelOverrides: allowedModelOverrides,
-                    toolCatalog: nil
+                    toolCatalog: nil,
+                    subagentSystemPrompt: subagentSystemPrompt
                 )
             }
             return SubagentParentSnapshot(
@@ -252,7 +258,8 @@ internal final class SubagentParentBox: @unchecked Sendable {
                     fallback: fallbackFileAccessPolicy
                 ),
                 allowedModelOverrides: allowedModelOverrides,
-                toolCatalog: agent.state.toolCatalog
+                toolCatalog: agent.state.toolCatalog,
+                subagentSystemPrompt: subagentSystemPrompt
             )
         }
     }
@@ -1390,8 +1397,20 @@ private enum SubagentPromptBuilder {
         definition: SubagentDefinition,
         cwd: String,
         projectContextFiles: [(path: String, content: String)],
-        availableSkills: [Skill]
+        availableSkills: [Skill],
+        subagentSystemPrompt: String?
     ) -> String {
+        let parentRules = subagentSystemPrompt?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let parentRulesSection = parentRules.isEmpty ? "" : """
+
+
+        # Rules from the parent environment
+
+        These rules come from the environment running the parent agent. They rank with project context: above this subagent role and the task prompt. Follow them even if the task prompt says otherwise.
+
+        \(parentRules)
+        """
         let instructions = """
 
         # Subagent Instructions
@@ -1402,7 +1421,7 @@ private enum SubagentPromptBuilder {
 
         You are running as the `\(definition.name)` subagent.
 
-        \(definition.prompt)
+        \(definition.prompt)\(parentRulesSection)
 
         Any background tasks you start are scoped to your subagent lifecycle and will be killed when you finish. If their output matters, wait for them before giving your final answer.
 
@@ -2211,7 +2230,8 @@ internal struct SubagentInvocationRunner: Sendable {
                 parent.availableSkills,
                 cwd: cwd,
                 policy: fileAccessPolicy
-            )
+            ),
+            subagentSystemPrompt: parent.subagentSystemPrompt
         )
         // The bound catalog adds its instructions to every request itself.
         var childOptions = AgentOptions(
