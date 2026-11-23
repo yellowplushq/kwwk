@@ -102,6 +102,30 @@ public actor SessionStore {
         let changedCount: Int
     }
 
+    private struct MetaSnapshot: Sendable {
+        var model: String?
+        var provider: String?
+        var thinkingLevel: String?
+        var title: String?
+
+        mutating func merge(
+            model: String? = nil,
+            provider: String? = nil,
+            thinkingLevel: String? = nil,
+            title: String? = nil
+        ) {
+            if let model { self.model = model }
+            if let provider { self.provider = provider }
+            if let thinkingLevel { self.thinkingLevel = thinkingLevel }
+            if let title { self.title = title }
+        }
+    }
+
+    /// Cached latest session metadata per session id, populated on create,
+    /// meta appends, and loads so `appendCompaction` can snapshot it onto the
+    /// compaction marker without re-reading the file.
+    private var latestMetaBySession: [String: MetaSnapshot] = [:]
+
     // MARK: - Create / append
 
     /// Create a new session file with a versioned header. Overwrites any
@@ -131,6 +155,7 @@ public actor SessionStore {
         ) else {
             throw SessionStoreError.writeFailed(path: url.path)
         }
+        latestMetaBySession[id] = MetaSnapshot(model: model, provider: provider)
         return header
     }
 
@@ -199,6 +224,14 @@ public actor SessionStore {
             thinkingLevel: thinkingLevel,
             title: title
         ))
+        var snapshot = latestMetaBySession[id] ?? MetaSnapshot()
+        snapshot.merge(
+            model: model,
+            provider: provider,
+            thinkingLevel: thinkingLevel,
+            title: title
+        )
+        latestMetaBySession[id] = snapshot
     }
 
     /// Record a user-set session title as an append-only `meta` entry,
@@ -235,6 +268,7 @@ public actor SessionStore {
             CompactionPlanner.summaryText(from: $0)
         } == nil ? nil : true
         let persistableMessages = replacementMessages.map(Self.removingInternalMessageSource)
+        let meta = latestMetaBySession[id]
         try appendEntry(
             id: id,
             .compaction(
@@ -247,7 +281,11 @@ public actor SessionStore {
                     contextWindow: contextWindow,
                     trustedRecap: trustedRecap,
                     reason: reason,
-                    usage: usage
+                    usage: usage,
+                    model: meta?.model,
+                    provider: meta?.provider,
+                    thinkingLevel: meta?.thinkingLevel,
+                    title: meta?.title
                 )
             ))
     }
@@ -365,16 +403,21 @@ public actor SessionStore {
         /// Every entry: the model-facing context plus the full visual
         /// history (`displayMessages`) a terminal recap shows.
         case full
-        /// The model-facing context only. Every compaction marker replaces
-        /// the context wholesale, so nothing before the newest marker can
-        /// reach it: those entries are skipped without being decoded, apart
-        /// from the small `meta` lines. `displayMessages` then equals
-        /// `messages`. A long-lived session's file keeps every message it
-        /// ever recorded, embedded images included, so this is what keeps
-        /// resuming one proportional to its live context rather than to its
-        /// age.
+        /// The model-facing context only. Reads the header at offset 0 and
+        /// scans backwards from EOF in bounded chunks until the newest
+        /// compaction marker is found, so entries before that marker are never
+        /// read from disk or decoded. `displayMessages` then equals `messages`.
+        /// A long-lived session's file keeps every message it ever recorded,
+        /// embedded images included, so tail-only I/O keeps resuming one
+        /// proportional to its live context rather than to its age — even over
+        /// network-backed filesystems.
         case context
     }
+
+    /// Default chunk size when scanning backwards from EOF in `loadContext`.
+    /// 256 KiB captures a typical compaction marker + trailing turns in a
+    /// single read while keeping memory bounded when a marker is farther back.
+    static let defaultTailChunkSize = 256 * 1024
 
     /// Replay a session file into its header, projected resumable context, raw
     /// transcript message entries, and latest metadata. Throws on a
@@ -384,10 +427,18 @@ public actor SessionStore {
     }
 
     public func load(at url: URL, scope: LoadScope = .full) throws -> LoadedSession {
+        let loaded: LoadedSession
         switch scope {
-        case .full: return try loadFull(at: url)
-        case .context: return try loadContext(at: url)
+        case .full: loaded = try loadFull(at: url)
+        case .context: loaded = try loadContext(at: url, tailChunkSize: Self.defaultTailChunkSize)
         }
+        latestMetaBySession[loaded.header.id] = MetaSnapshot(
+            model: loaded.model,
+            provider: loaded.provider,
+            thinkingLevel: loaded.thinkingLevel,
+            title: loaded.title
+        )
+        return loaded
     }
 
     private func loadFull(at url: URL) throws -> LoadedSession {
@@ -413,48 +464,121 @@ public actor SessionStore {
         return replay.loaded
     }
 
-    private func loadContext(at url: URL) throws -> LoadedSession {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+    func loadContext(at url: URL, tailChunkSize: Int = defaultTailChunkSize) throws -> LoadedSession {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: url)
+        } catch {
             throw SessionStoreError.notFound(url.lastPathComponent)
         }
-        let lines = Self.lineRanges(in: data)
-        guard let first = lines.first else {
+        defer { try? handle.close() }
+
+        let fileSize: UInt64
+        do {
+            fileSize = try handle.seekToEnd()
+        } catch {
+            throw SessionStoreError.notFound(url.lastPathComponent)
+        }
+        guard fileSize > 0 else {
             throw SessionStoreError.missingHeader(url.path)
         }
-        guard let headerLine = String(data: data.subdata(in: first), encoding: .utf8) else {
+
+        let (headerData, bodyStartOffset) = try Self.readHeaderLine(
+            from: handle,
+            fileSize: fileSize,
+            path: url.path
+        )
+        guard let headerLine = String(data: headerData, encoding: .utf8) else {
             throw SessionStoreError.invalidHeader(url.path)
         }
         var replay = Replay(header: try parseHeader(headerLine, path: url.path), tracksDisplay: false)
+        guard bodyStartOffset < fileSize else {
+            return replay.loaded
+        }
 
-        // The newest compaction marker, searched from the end. A raw
-        // `"type":"compaction"` (unescaped quotes) only occurs as an entry's
-        // own discriminator: inside a message it would be string content,
-        // where the quotes are escaped. The decode confirms it all the same.
-        var start = 1
-        var index = lines.count - 1
-        while index >= 1 {
-            if Self.contains(data, lines[index], Self.compactionDiscriminator),
-               case .compaction? = try? Self.decodeEntry(
-                    data.subdata(in: lines[index]), path: url.path, line: index + 1) {
-                start = index
-                break
+        // Scan backwards from EOF in bounded chunks until we hit the newest
+        // compaction marker (or reach `bodyStartOffset` when no compaction
+        // exists). Bytes before that marker are never read from disk.
+        let chunkSize = max(1, tailChunkSize)
+        var cursor = fileSize
+        var fragmentChunks: [Data] = []
+        var collectedReversed: [(data: Data, offset: UInt64)] = []
+        var foundCompaction = false
+
+        func isCompactionMarker(_ lineData: Data) -> Bool {
+            guard Self.contains(lineData, Self.compactionDiscriminator) else { return false }
+            if case .compaction? = try? Self.decoder.decode(Entry.self, from: lineData) {
+                return true
             }
-            index -= 1
+            return false
         }
-        // Metadata is sparse and may predate the marker; nothing else before
-        // it can reach the projected context.
-        for index in lines.indices.dropFirst().prefix(while: { $0 < start })
-        where Self.contains(data, lines[index], Self.metaDiscriminator) {
-            replay.apply(try Self.decodeEntry(data.subdata(in: lines[index]), path: url.path, line: index + 1))
+
+        while cursor > bodyStartOffset && !foundCompaction {
+            let step = UInt64(chunkSize)
+            let readStart = cursor > step ? max(bodyStartOffset, cursor - step) : bodyStartOffset
+            let length = Int(cursor - readStart)
+            let chunk = try Self.readExact(handle: handle, offset: readStart, count: length)
+
+            var segmentEnd = chunk.count
+            chunk.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                var i = chunk.count - 1
+                while i >= 0 {
+                    if bytes[i] == 0x0A {
+                        let lineStart = i + 1
+                        let lineData = Self.assembleLine(
+                            prefix: chunk,
+                            range: lineStart..<segmentEnd,
+                            trailingChunksReversed: fragmentChunks
+                        )
+                        fragmentChunks.removeAll(keepingCapacity: true)
+                        segmentEnd = i
+                        if !lineData.isEmpty {
+                            let lineOffset = readStart + UInt64(lineStart)
+                            collectedReversed.append((lineData, lineOffset))
+                            if isCompactionMarker(lineData) {
+                                foundCompaction = true
+                                break
+                            }
+                        }
+                    }
+                    i -= 1
+                }
+            }
+
+            if !foundCompaction {
+                if segmentEnd > 0 {
+                    fragmentChunks.append(Data(chunk[0..<segmentEnd]))
+                }
+                cursor = readStart
+            }
         }
-        for index in lines.indices.dropFirst(start) {
-            replay.apply(try Self.decodeEntry(data.subdata(in: lines[index]), path: url.path, line: index + 1))
+
+        if !foundCompaction && !fragmentChunks.isEmpty {
+            let lineData = Self.assembleLine(
+                prefix: nil,
+                range: 0..<0,
+                trailingChunksReversed: fragmentChunks
+            )
+            if !lineData.isEmpty {
+                collectedReversed.append((lineData, bodyStartOffset))
+            }
+        }
+
+        for item in collectedReversed.reversed() {
+            do {
+                let entry = try Self.decoder.decode(Entry.self, from: item.data)
+                replay.apply(entry)
+            } catch {
+                // Only on the error path do we scan preceding bytes to report
+                // the exact 1-based non-empty line number.
+                let preceding = (try? Self.countNonEmptyLines(in: handle, upTo: item.offset)) ?? 0
+                throw SessionStoreError.undecodableEntry(path: url.path, line: preceding + 1)
+            }
         }
         return replay.loaded
     }
 
     private static let compactionDiscriminator = Array(#""type":"compaction""#.utf8)
-    private static let metaDiscriminator = Array(#""type":"meta""#.utf8)
 
     private static func decodeEntry(_ data: Data, path: String, line: Int) throws -> Entry {
         do {
@@ -464,27 +588,126 @@ public actor SessionStore {
         }
     }
 
-    /// The non-empty lines of `data`, numbered like
-    /// `split(separator: "\n", omittingEmptySubsequences: true)` numbers them.
-    private static func lineRanges(in data: Data) -> [Range<Int>] {
-        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> [Range<Int>] in
-            var ranges: [Range<Int>] = []
-            var lineStart = 0
-            for offset in 0..<bytes.count where bytes[offset] == 0x0A {
-                if offset > lineStart { ranges.append(lineStart..<offset) }
-                lineStart = offset + 1
+    private static func readExact(handle: FileHandle, offset: UInt64, count: Int) throws -> Data {
+        guard count > 0 else { return Data() }
+        try handle.seek(toOffset: offset)
+        var result = Data()
+        result.reserveCapacity(count)
+        while result.count < count {
+            guard let chunk = try handle.read(upToCount: count - result.count),
+                  !chunk.isEmpty else {
+                break
             }
-            if bytes.count > lineStart { ranges.append(lineStart..<bytes.count) }
-            return ranges
+            result.append(chunk)
         }
+        return result
     }
 
-    /// Whether `needle` occurs inside `data[range]`, without copying the line.
-    private static func contains(_ data: Data, _ range: Range<Int>, _ needle: [UInt8]) -> Bool {
-        guard let head = needle.first, range.count >= needle.count else { return false }
+    /// Reads the first non-empty line at the start of the file without pulling
+    /// the rest of the file into memory. Returns the line bytes (without `\n`)
+    /// and the byte offset immediately after its terminating `\n` (or
+    /// `fileSize` if the file has only one line).
+    private static func readHeaderLine(
+        from handle: FileHandle,
+        fileSize: UInt64,
+        path: String
+    ) throws -> (Data, UInt64) {
+        var offset: UInt64 = 0
+        var chunkSize = 4096
+        var line = Data()
+
+        while offset < fileSize {
+            let remaining = Int(min(UInt64(chunkSize), fileSize - offset))
+            let chunk = try readExact(handle: handle, offset: offset, count: remaining)
+            guard !chunk.isEmpty else { break }
+
+            var searchStart = 0
+            if line.isEmpty {
+                // Skip any leading empty lines to match `split(omittingEmptySubsequences: true)`.
+                while searchStart < chunk.count && chunk[searchStart] == 0x0A {
+                    searchStart += 1
+                }
+                if searchStart == chunk.count {
+                    offset += UInt64(chunk.count)
+                    continue
+                }
+            }
+
+            if let newline = chunk[searchStart...].firstIndex(of: 0x0A) {
+                line.append(chunk[searchStart..<newline])
+                return (line, offset + UInt64(newline) + 1)
+            }
+            line.append(chunk[searchStart..<chunk.count])
+            offset += UInt64(chunk.count)
+            chunkSize = min(chunkSize * 2, defaultTailChunkSize)
+        }
+
+        guard !line.isEmpty else {
+            throw SessionStoreError.missingHeader(path)
+        }
+        return (line, fileSize)
+    }
+
+    /// Assembles a line from its leftmost slice in the current chunk plus any
+    /// trailing fragments collected from earlier (right-hand) chunks.
+    private static func assembleLine(
+        prefix: Data?,
+        range: Range<Int>,
+        trailingChunksReversed: [Data]
+    ) -> Data {
+        if trailingChunksReversed.isEmpty {
+            guard let prefix, !range.isEmpty else { return Data() }
+            return Data(prefix[range])
+        }
+        var total = range.count
+        for chunk in trailingChunksReversed { total += chunk.count }
+        var out = Data()
+        out.reserveCapacity(total)
+        if let prefix, !range.isEmpty {
+            out.append(prefix[range])
+        }
+        for chunk in trailingChunksReversed.reversed() {
+            out.append(chunk)
+        }
+        return out
+    }
+
+    /// Streams `0..<limit` in chunks to count non-empty lines, matching
+    /// `split(separator: "\n", omittingEmptySubsequences: true)`. Called only
+    /// when reporting an undecodable-entry error line number.
+    private static func countNonEmptyLines(in handle: FileHandle, upTo limit: UInt64) throws -> Int {
+        guard limit > 0 else { return 0 }
+        var offset: UInt64 = 0
+        var count = 0
+        var inLine = false
+        while offset < limit {
+            let step = Int(min(UInt64(defaultTailChunkSize), limit - offset))
+            let chunk = try readExact(handle: handle, offset: offset, count: step)
+            guard !chunk.isEmpty else { break }
+            chunk.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                for i in 0..<bytes.count {
+                    if bytes[i] == 0x0A {
+                        if inLine {
+                            count += 1
+                            inLine = false
+                        }
+                    } else {
+                        inLine = true
+                    }
+                }
+            }
+            offset += UInt64(chunk.count)
+        }
+        if inLine { count += 1 }
+        return count
+    }
+
+    /// Whether `needle` occurs inside `data`, without copying.
+    private static func contains(_ data: Data, _ needle: [UInt8]) -> Bool {
+        guard let head = needle.first, data.count >= needle.count else { return false }
         return data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Bool in
-            var offset = range.lowerBound
-            let last = range.upperBound - needle.count
+            var offset = 0
+            let last = bytes.count - needle.count
             while offset <= last {
                 if bytes[offset] == head {
                     var matched = 1
@@ -527,6 +750,10 @@ public actor SessionStore {
                 if let t { thinkingLevel = t }
                 if let ti { title = ti }
             case .compaction(_, let compaction):
+                if let m = compaction.model { model = m }
+                if let p = compaction.provider { provider = p }
+                if let t = compaction.thinkingLevel { thinkingLevel = t }
+                if let ti = compaction.title { title = ti }
                 messages = SessionStore.upgradingLegacyRecapSource(
                     in: compaction.replacementMessages,
                     reason: compaction.reason,

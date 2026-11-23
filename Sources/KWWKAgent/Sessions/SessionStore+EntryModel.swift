@@ -62,6 +62,14 @@ extension SessionStore {
         /// those tokens. Nil when nothing was billed (native or non-LLM
         /// compaction) and in older session files; older readers ignore it.
         public var usage: Usage?
+        /// Snapshot of the latest session metadata active when this compaction
+        /// was written, so tail-only context loads do not have to scan entries
+        /// predating the newest compaction marker. Older readers ignore these
+        /// additive fields.
+        public var model: String?
+        public var provider: String?
+        public var thinkingLevel: String?
+        public var title: String?
 
         public init(
             replacementMessages: [Message],
@@ -71,7 +79,11 @@ extension SessionStore {
             contextWindow: Int? = nil,
             trustedRecap: Bool? = nil,
             reason: CompactionReason?,
-            usage: Usage? = nil
+            usage: Usage? = nil,
+            model: String? = nil,
+            provider: String? = nil,
+            thinkingLevel: String? = nil,
+            title: String? = nil
         ) {
             self.replacementMessages = replacementMessages
             self.messagesCompacted = messagesCompacted
@@ -81,6 +93,10 @@ extension SessionStore {
             self.trustedRecap = trustedRecap
             self.reason = reason
             self.usage = usage
+            self.model = model
+            self.provider = provider
+            self.thinkingLevel = thinkingLevel
+            self.title = title
         }
     }
 
@@ -123,7 +139,11 @@ extension SessionStore {
                         contextWindow: try c.decodeIfPresent(Int.self, forKey: .contextWindow),
                         trustedRecap: try c.decodeIfPresent(Bool.self, forKey: .trustedRecap),
                         reason: try c.decodeIfPresent(CompactionReason.self, forKey: .reason),
-                        usage: try c.decodeIfPresent(Usage.self, forKey: .usage)
+                        usage: try c.decodeIfPresent(Usage.self, forKey: .usage),
+                        model: try c.decodeIfPresent(String.self, forKey: .model),
+                        provider: try c.decodeIfPresent(String.self, forKey: .provider),
+                        thinkingLevel: try c.decodeIfPresent(String.self, forKey: .thinkingLevel),
+                        title: try c.decodeIfPresent(String.self, forKey: .title)
                     )
                 )
             }
@@ -154,6 +174,10 @@ extension SessionStore {
                 try c.encodeIfPresent(compaction.trustedRecap, forKey: .trustedRecap)
                 try c.encodeIfPresent(compaction.reason, forKey: .reason)
                 try c.encodeIfPresent(compaction.usage, forKey: .usage)
+                try c.encodeIfPresent(compaction.model, forKey: .model)
+                try c.encodeIfPresent(compaction.provider, forKey: .provider)
+                try c.encodeIfPresent(compaction.thinkingLevel, forKey: .thinkingLevel)
+                try c.encodeIfPresent(compaction.title, forKey: .title)
             }
         }
     }

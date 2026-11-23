@@ -182,6 +182,140 @@ struct SessionContextLoadTests {
         #expect(resolved.persistedCount == 2)
     }
 
+    @Test("context load across fresh SessionStore preserves pre-compaction metadata from compaction snapshot")
+    func freshStorePreservesSnapshotMetadata() async throws {
+        let (writer, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = "restarted"
+        let cwd = "/w"
+
+        try await writer.append(id: id, cwd: cwd, messages: [user("a"), assistant("b")], model: "m0", provider: "p0")
+        try await writer.appendMeta(id: id, model: "m1", thinkingLevel: "high")
+        try await writer.setTitle(id: id, cwd: cwd, title: "persisted title")
+        try await writer.appendCompaction(
+            id: id,
+            cwd: cwd,
+            replacementMessages: [user("summary")],
+            messagesCompacted: 2,
+            reason: .compact
+        )
+        try await writer.appendMeta(id: id, provider: "p2")
+        try await writer.append(id: id, cwd: cwd, message: user("after"))
+
+        // A brand-new store (fresh process) with no in-memory cache still sees
+        // pre-compaction metadata via the compaction snapshot + post-compaction meta.
+        let reader = SessionStore(directory: dir)
+        let context = try await reader.load(id: id, scope: .context)
+        let full = try await reader.load(id: id, scope: .full)
+        #expect(context.messages == full.messages)
+        #expect(context.model == "m1")
+        #expect(context.provider == "p2")
+        #expect(context.thinkingLevel == "high")
+        #expect(context.title == "persisted title")
+    }
+
+    @Test("tail chunk scan handles tiny chunks, multi-chunk lines, blank lines, and no trailing newline")
+    func multiChunkTailBoundaries() async throws {
+        let (store, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = "chunked"
+        let cwd = "/w"
+        let bigPayload = String(repeating: "x", count: 512)
+
+        try await store.append(id: id, cwd: cwd, messages: [user("old1"), assistant("old2")], model: "m0", provider: "p0")
+        try await store.appendMeta(id: id, model: "m1", thinkingLevel: "medium")
+        try await store.appendCompaction(
+            id: id,
+            cwd: cwd,
+            replacementMessages: [user("summary-" + bigPayload)],
+            messagesCompacted: 2,
+            reason: .compact
+        )
+        try await store.append(id: id, cwd: cwd, messages: [
+            user("after-1-" + bigPayload),
+            assistant("after-2"),
+        ])
+
+        let url = dir.appendingPathComponent("\(id).jsonl")
+        // Inject blank lines and strip the trailing newline to exercise edge cases.
+        var raw = try String(contentsOf: url, encoding: .utf8)
+        raw = "\n\n" + raw.replacingOccurrences(of: "\n", with: "\n\n")
+        while raw.hasSuffix("\n") { raw.removeLast() }
+        try raw.write(to: url, atomically: true, encoding: .utf8)
+
+        let full = try await store.load(at: url, scope: .full)
+        // Exercise chunk sizes smaller than a single line (32, 64, 127 bytes).
+        for chunkSize in [32, 64, 127, 4096] {
+            let context = try await store.loadContext(at: url, tailChunkSize: chunkSize)
+            #expect(context.messages == full.messages)
+            #expect(context.model == "m1")
+            #expect(context.provider == "p0")
+            #expect(context.thinkingLevel == "medium")
+            #expect(context.header == full.header)
+        }
+    }
+
+    @Test("context load ignores unreadable corruption far before the marker and reports exact line after it")
+    func largePrefixNeverReadOnHappyPath() async throws {
+        let (store, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let id = "large-prefix"
+        let cwd = "/w"
+
+        try await store.create(id: id, cwd: cwd, model: "m0", provider: "p0")
+        let url = dir.appendingPathComponent("\(id).jsonl")
+
+        // Write ~2 MiB of invalid non-UTF8 / corrupt JSON lines before the compaction marker.
+        // A tail-only reader must never touch or decode them.
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            var garbageLine = Data([0xFF, 0xFE, 0x7B])
+            garbageLine.append(Data(repeating: 0x41, count: 64 * 1024))
+            garbageLine.append(0x0A)
+            for _ in 0..<32 {
+                handle.write(garbageLine)
+            }
+        }
+
+        try await store.appendCompaction(
+            id: id,
+            cwd: cwd,
+            replacementMessages: [user("compacted")],
+            messagesCompacted: 32,
+            reason: .compact
+        )
+        try await store.append(id: id, cwd: cwd, message: assistant("live"))
+
+        let context = try await store.load(id: id, scope: .context)
+        #expect(texts(context.messages) == ["compacted", "live"])
+        #expect(context.persistedContextCount == 2)
+
+        // Appending a corrupt line after the marker still reports its exact 1-based line number:
+        // 1 (header) + 32 (garbage lines) + 1 (compaction) + 1 (assistant) + 1 (corrupt) = 36.
+        try appendRaw(#"{"message":"bad","timestamp":1,"type":"message"}"#, id: id, dir: dir)
+        var caught: SessionStore.SessionStoreError?
+        do {
+            _ = try await store.load(id: id, scope: .context)
+        } catch let error as SessionStore.SessionStoreError {
+            caught = error
+        }
+        #expect(caught == .undecodableEntry(path: url.path, line: 36))
+    }
+
+    @Test("header-only session loads empty context")
+    func headerOnlySession() async throws {
+        let (store, dir) = tempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await store.create(id: "empty", cwd: "/w", model: "m0", provider: "p0")
+
+        let context = try await store.load(id: "empty", scope: .context)
+        #expect(context.messages.isEmpty)
+        #expect(context.model == "m0")
+        #expect(context.provider == "p0")
+    }
+
     private func tempStore() -> (SessionStore, URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("kwsess-context-\(UUID().uuidString)")
