@@ -16,6 +16,7 @@ public enum ProviderAttribution {
     /// registers (`chatgpt-codex` wire scope, `openai-codex` catalog key,
     /// `openai-compatible` custom endpoints).
     public static let displayNames: [String: String] = [
+        "agy": "Antigravity CLI",
         "anthropic": "Anthropic",
         "amazon-bedrock": "Amazon Bedrock",
         "ant-ling": "Ant Ling",
@@ -139,7 +140,7 @@ public enum ProviderAttribution {
 
     /// Convenience overload taking a `Model`.
     public static func attributionHeaders(for model: Model) -> [String: String]? {
-        attributionHeaders(provider: model.provider, baseURL: model.baseURL)
+        attributionHeaders(provider: model.behaviorProvider, baseURL: model.baseURL)
     }
 
     /// Merge attribution headers for `model` with any caller-supplied header

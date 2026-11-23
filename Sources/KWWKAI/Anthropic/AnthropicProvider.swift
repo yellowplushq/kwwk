@@ -37,6 +37,13 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
     /// Route-level output ceiling (Claude Code OAuth uses 64k). API-key
     /// providers leave this nil and use the model capability directly.
     public let maximumOutputTokens: Int?
+    /// Optional wire-level model ID transform (e.g. AirRelay prefixes `agy`
+    /// slugs as `agy/<slug>` while keeping the unprefixed `model.id` on the
+    /// streamed `AssistantMessage`).
+    public let modelIDTransform: (@Sendable (Model) -> String)?
+    /// Optional route-level `ModelCompat` transform applied to request
+    /// encoding, headers, and compaction capability checks.
+    public let compatTransform: (@Sendable (ModelCompat?) -> ModelCompat?)?
 
     public init(
         api: String = "anthropic-messages",
@@ -47,7 +54,9 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         extraHeaders: [String: String] = [:],
         authHeaderBuilder: AuthHeaderBuilder? = nil,
         systemPromptPrefix: String? = nil,
-        maximumOutputTokens: Int? = nil
+        maximumOutputTokens: Int? = nil,
+        modelIDTransform: (@Sendable (Model) -> String)? = nil,
+        compatTransform: (@Sendable (ModelCompat?) -> ModelCompat?)? = nil
     ) {
         self.api = api
         self.client = client
@@ -58,6 +67,15 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         self.authHeaderBuilder = authHeaderBuilder ?? { key in ["x-api-key": key] }
         self.systemPromptPrefix = systemPromptPrefix
         self.maximumOutputTokens = maximumOutputTokens
+        self.modelIDTransform = modelIDTransform
+        self.compatTransform = compatTransform
+    }
+
+    private func effectiveModel(_ model: Model) -> Model {
+        guard let compatTransform else { return model }
+        var copy = model
+        copy.compat = compatTransform(model.compat)
+        return copy
     }
 
     public func stream(model: Model, context: Context, options: StreamOptions?) -> AssistantMessageStream {
@@ -74,25 +92,29 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         instructions: String,
         options: StreamOptions?
     ) async throws -> NativeCompactionResult? {
-        let base = model.baseURL.isEmpty ? defaultBaseURL.absoluteString : model.baseURL
+        let effective = effectiveModel(model)
+        let base = effective.baseURL.isEmpty ? defaultBaseURL.absoluteString : effective.baseURL
         let url = URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/messages")!
-        guard Self.supportsNativeCompaction(model: model, baseURL: base) else { return nil }
-        let fallbackEnabled = Self.usesServerSideFallback(model: model, url: url, options: options)
+        guard Self.supportsNativeCompaction(model: effective, baseURL: base) else { return nil }
+        let fallbackEnabled = Self.usesServerSideFallback(model: effective, url: url, options: options)
         var nativeContext = context
-        if case .assistant? = nativeContext.messages.last {
+        if Self.endsWithAssistantTurn(nativeContext.messages, model: model) {
             // Do not let an assistant-final transcript become an unsupported
-            // prefill. This synthetic control message is not persisted.
+            // prefill; a replayed compaction is an assistant turn too, and
+            // this asks to compact rather than the encoder's request to
+            // continue. This synthetic control message is not persisted.
             nativeContext.messages.append(.user(UserMessage(
                 text: "Compact the preceding conversation; do not continue the task."
             )))
         }
         let encoded = try Self.encodeBody(
-            model: model,
+            model: effective,
             context: nativeContext,
             options: options,
             systemPromptPrefix: systemPromptPrefix,
             maximumOutputTokens: maximumOutputTokens,
-            fallbackEnabled: fallbackEnabled
+            fallbackEnabled: fallbackEnabled,
+            wireModelID: modelIDTransform?(effective)
         )
         var body = try JSONDecoder().decode([String: JSONValue].self, from: encoded)
         body["stream"] = false
@@ -100,7 +122,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             "type": "compact_20260112", "trigger": ["type": "input_tokens", "value": 50_000],
             "pause_after_compaction": true, "instructions": .string(instructions),
         ]]]
-        var headers = makeHeaders(model: model, context: context, options: options, fallbackEnabled: fallbackEnabled)
+        var headers = makeHeaders(model: effective, context: context, options: options, fallbackEnabled: fallbackEnabled)
         headers["accept"] = "application/json"
         let beta = headers["anthropic-beta"].map { $0 + "," } ?? ""
         headers["anthropic-beta"] = beta + "compact-2026-01-12"
@@ -129,8 +151,30 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         }
         return NativeCompactionResult(
             summary: summary,
-            payload: NativeCompactionPayload(model: model, items: [block])
+            payload: NativeCompactionPayload(model: model, items: [block]),
+            usage: Self.compactionUsage(json["usage"], model: model)
         )
+    }
+
+    /// The summarizing pass is billed in `usage.iterations`, which the
+    /// top-level counts omit: sum the iterations when present.
+    static func compactionUsage(_ value: JSONValue?, model: Model) -> Usage? {
+        guard case .object(let reported)? = value else { return nil }
+        var entries: [JSONValue] = [.object(reported)]
+        if case .array(let iterations)? = reported["iterations"], !iterations.isEmpty { entries = iterations }
+        var total = Usage()
+        for case .object(let entry) in entries {
+            let state = AnthropicStreamState(api: model.api, provider: model.provider, modelId: model.id)
+            state.applyUsageDelta(entry)
+            total.input += state.usage.input
+            total.output += state.usage.output
+            total.cacheRead += state.usage.cacheRead
+            total.cacheWrite += state.usage.cacheWrite
+            total.cacheWrite1h += state.usage.cacheWrite1h
+        }
+        total.totalTokens = total.input + total.output + total.cacheRead + total.cacheWrite
+        total.cost = calculateCost(model: model, usage: total)
+        return total
     }
 
     static func supportsNativeCompaction(model: Model, baseURL: String? = nil) -> Bool {
@@ -224,7 +268,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
     private static func usesServerSideFallback(model: Model, url: URL, options: StreamOptions?) -> Bool {
         options?.anthropicServerSideFallback == true
             && url.scheme == "https" && url.host?.lowercased() == "api.anthropic.com"
-            && model.provider == "anthropic" && model.api == "anthropic-messages"
+            && model.behaviorProvider == "anthropic" && model.api == "anthropic-messages"
             && serverFallbackModels.contains(model.id)
     }
 
@@ -234,23 +278,25 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         context: Context,
         options: StreamOptions?
     ) async {
+        let effective = effectiveModel(model)
         let url: URL = {
-            var base = model.baseURL.isEmpty ? defaultBaseURL.absoluteString : model.baseURL
+            var base = effective.baseURL.isEmpty ? defaultBaseURL.absoluteString : effective.baseURL
             while base.hasSuffix("/") { base.removeLast() }
             return URL(string: "\(base)/v1/messages") ?? defaultBaseURL.appendingPathComponent("v1/messages")
         }()
 
-        let fallbackEnabled = Self.usesServerSideFallback(model: model, url: url, options: options)
+        let fallbackEnabled = Self.usesServerSideFallback(model: effective, url: url, options: options)
 
         let body: Data
         do {
             body = try Self.encodeBody(
-                model: model,
+                model: effective,
                 context: context,
                 options: options,
                 systemPromptPrefix: systemPromptPrefix,
                 maximumOutputTokens: maximumOutputTokens,
-                fallbackEnabled: fallbackEnabled
+                fallbackEnabled: fallbackEnabled,
+                wireModelID: modelIDTransform?(effective)
             )
         } catch {
             out.push(.error(reason: .error, error: AssistantMessage.makeError(
@@ -262,7 +308,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             return
         }
 
-        let headers = makeHeaders(model: model, context: context, options: options, fallbackEnabled: fallbackEnabled)
+        let headers = makeHeaders(model: effective, context: context, options: options, fallbackEnabled: fallbackEnabled)
 
         do {
             let (response, stream) = try await client.stream(

@@ -158,6 +158,94 @@ struct NativeCompactionTests {
         #expect(body["messages"]?.arrayValue?.last?["role"] == "user")
     }
 
+    static func bareRecap() -> Message {
+        var recap = UserMessage(text: "ledger", source: .compaction)
+        recap.nativeCompaction = NativeCompactionPayload(model: claude,
+            items: [["type": "compaction", "content": "summary", "encrypted_content": "signed"]])
+        return .user(recap)
+    }
+
+    @Test func anthropicBareCompactionEndsWithUser() throws {
+        // The whole transcript was summarized, so only the replayed
+        // compaction (an assistant turn) and a tool change remain.
+        let tool = Tool(name: "read", description: "read files", parameters: ["type": "object"])
+        let encoded = try AnthropicProvider.encodeBody(model: Self.claude,
+            context: Context(messages: [Self.bareRecap(), .system(SystemMessage(toolsAdded: [tool]))]),
+            options: nil)
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: encoded)
+        let messages = try #require(body["messages"]?.arrayValue)
+        #expect(messages.first?["role"] == "assistant")
+        let last = try #require(messages.last)
+        #expect(last["role"] == "user")
+        #expect(last["content"]?.arrayValue?.first?["text"] == .string(AnthropicProvider.continueAfterCompaction))
+
+        let kept = try AnthropicProvider.encodeBody(model: Self.claude,
+            context: Context(messages: [Self.bareRecap(), .user(UserMessage(text: "next"))]), options: nil)
+        #expect(!String(decoding: kept, as: UTF8.self).contains(AnthropicProvider.continueAfterCompaction))
+    }
+
+    @Test func anthropicCompactAfterBareCompactionIsNotAPrefill() async throws {
+        let client = StubSSEClient(body: #"{"stop_reason":"compaction","content":[{"type":"compaction","content":"summary"}]}"#)
+        _ = try await AnthropicProvider(client: client).compact(model: Self.claude,
+            context: Context(messages: [Self.bareRecap()]), instructions: "", options: nil)
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: #require(client.lastRequest?.body))
+        let last = try #require(body["messages"]?.arrayValue?.last)
+        #expect(last["role"] == "user")
+        let text = String(decoding: try JSONEncoder().encode(last), as: UTF8.self)
+        #expect(text.contains("Compact the preceding conversation"))
+        #expect(!text.contains(AnthropicProvider.continueAfterCompaction))
+    }
+
+    @Test func anthropicBareCompactionWithAnchoredToolChangesAppendsContinueTurn() throws {
+        var model = Self.claude
+        var compat = ModelCompat()
+        compat.supportsMidConvoSystemMessages = true
+        compat.supportsMidConvoToolChanges = true
+        model.compat = compat
+        let read = Tool(name: "read", description: "read files", parameters: ["type": "object"])
+        let write = Tool(name: "write", description: "write files", parameters: ["type": "object"])
+        let encoded = try AnthropicProvider.encodeBody(
+            model: model,
+            context: Context(
+                messages: [
+                    Self.bareRecap(),
+                    .system(SystemMessage(toolsAdded: [read])),
+                    .system(SystemMessage(toolsAdded: [write])),
+                ],
+                tools: [read, write]
+            ),
+            options: nil
+        )
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: encoded)
+        let messages = try #require(body["messages"]?.arrayValue)
+        #expect(messages.compactMap { $0["role"] } == [.string("assistant"), .string("user"), .string("system")])
+        #expect(messages[1]["content"]?.arrayValue?.first?["text"] == .string(AnthropicProvider.continueAfterCompaction))
+    }
+
+    @Test func anthropicCompactIgnoresTrailingSystemAfterAssistant() async throws {
+        let client = StubSSEClient(body: #"{"stop_reason":"compaction","content":[{"type":"compaction","content":"summary"}]}"#)
+        let tool = Tool(name: "read", description: "read files", parameters: ["type": "object"])
+        _ = try await AnthropicProvider(client: client).compact(
+            model: Self.claude,
+            context: Context(messages: [
+                .assistant(AssistantMessage(
+                    content: [.text(TextContent(text: "notes\n"))],
+                    api: Self.claude.api,
+                    provider: Self.claude.provider,
+                    model: Self.claude.id
+                )),
+                .system(SystemMessage(toolsRemoved: [tool.name])),
+            ]),
+            instructions: "",
+            options: nil
+        )
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: #require(client.lastRequest?.body))
+        let last = try #require(body["messages"]?.arrayValue?.last)
+        #expect(last["role"] == "user")
+        let text = String(decoding: try JSONEncoder().encode(last), as: UTF8.self)
+        #expect(text.contains("Compact the preceding conversation"))
+    }
+
     @Test func explicitResponsesV1RouteStillWorks() async throws {
         var model = Self.codex
         model.api = "openai-responses"
@@ -176,6 +264,38 @@ struct NativeCompactionTests {
         #expect(client.lastRequest?.url.path.hasSuffix("/responses/compact") == true)
     }
 
+    // Seen on claude-opus-5-5 over OAuth when adaptive thinking spent max_tokens:
+    // stop_reason "compaction" with a block whose content is null. Keep this a
+    // non-retryable ProviderFailure so the pipeline falls back to a local
+    // summary while still emitting the verbose diagnostic.
+    @Test(arguments: [#""content":null"#, #""content":"""#, #""content":"  \n""#, ""])
+    func anthropicEmptySummaryThrowsProviderFailure(content: String) async {
+        let fields = content.isEmpty ? #""type":"compaction""# : #""type":"compaction","# + content
+        let body = #"{"stop_reason":"compaction","content":[{"# + fields + "}]}"
+        let provider = AnthropicProvider(client: StubSSEClient(body: body))
+        await #expect(throws: ProviderFailure.self) {
+            try await provider.compact(
+                model: Self.claude,
+                context: Context(messages: [.user(UserMessage(text: "history"))]),
+                instructions: "",
+                options: nil
+            )
+        }
+    }
+
+    @Test func anthropicMissingCompactionBlockRemainsAnError() async {
+        let body = #"{"stop_reason":"compaction","content":[{"type":"text","text":"hi"}]}"#
+        let provider = AnthropicProvider(client: StubSSEClient(body: body))
+        await #expect(throws: ProviderFailure.self) {
+            try await provider.compact(
+                model: Self.claude,
+                context: Context(messages: []),
+                instructions: "",
+                options: nil
+            )
+        }
+    }
+
     // pi #7048's no-truncated-summary invariant also applies to native payloads.
     @Test(arguments: ["max_tokens", "end_turn", "refusal"])
     func anthropicPartialSummaryIsNotAccepted(stop: String) async {
@@ -189,6 +309,20 @@ struct NativeCompactionTests {
                 options: nil
             )
         }
+    }
+
+    @Test("Anthropic compaction usage sums the iterations")
+    func anthropicUsage() async throws {
+        let body = #"{"stop_reason":"compaction","content":[{"type":"compaction","content":"summary"}],"usage":{"input_tokens":0,"output_tokens":0,"iterations":[{"input_tokens":3,"cache_read_input_tokens":200000,"cache_creation_input_tokens":1200,"output_tokens":5000},{"input_tokens":2,"output_tokens":7}]}}"#
+        let result = try #require(try await AnthropicProvider(client: StubSSEClient(body: body)).compact(
+            model: Self.claude, context: Context(messages: [.user(UserMessage(text: "history"))]),
+            instructions: "", options: nil))
+        let usage = try #require(result.usage)
+        #expect(usage.input == 5)
+        #expect(usage.output == 5_007)
+        #expect(usage.cacheRead == 200_000)
+        #expect(usage.cacheWrite == 1_200)
+        #expect(usage.totalTokens == 206_212)
     }
 }
 

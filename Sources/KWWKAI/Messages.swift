@@ -236,6 +236,9 @@ public struct Usage: Codable, Sendable, Hashable {
     public var reasoning: Int
     public var totalTokens: Int
     public var cost: Cost
+    /// Provider-reported inference speed (Anthropic `usage.speed`: "standard"
+    /// or "fast"), kept verbatim. Nil when the provider did not report one.
+    public var speed: String?
     public init(
         input: Int = 0,
         output: Int = 0,
@@ -244,7 +247,8 @@ public struct Usage: Codable, Sendable, Hashable {
         cacheWrite1h: Int = 0,
         reasoning: Int = 0,
         totalTokens: Int = 0,
-        cost: Cost = .init()
+        cost: Cost = .init(),
+        speed: String? = nil
     ) {
         self.input = input
         self.output = output
@@ -254,10 +258,11 @@ public struct Usage: Codable, Sendable, Hashable {
         self.reasoning = reasoning
         self.totalTokens = totalTokens
         self.cost = cost
+        self.speed = speed
     }
 
     private enum CodingKeys: String, CodingKey {
-        case input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning, totalTokens, cost, anthropicIterations
+        case input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning, totalTokens, cost, speed, anthropicIterations
     }
 
     public init(from decoder: Decoder) throws {
@@ -270,6 +275,7 @@ public struct Usage: Codable, Sendable, Hashable {
         self.reasoning = try c.decodeIfPresent(Int.self, forKey: .reasoning) ?? 0
         self.totalTokens = try c.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
         self.cost = try c.decodeIfPresent(Cost.self, forKey: .cost) ?? .init()
+        self.speed = try? c.decodeIfPresent(String.self, forKey: .speed)
         self.anthropicIterations = try c.decodeIfPresent([JSONValue].self, forKey: .anthropicIterations)
     }
 }

@@ -462,6 +462,37 @@ struct AnthropicProviderTests {
         #expect(json["temperature"] == nil)
     }
 
+    // A low explicit maxTokens with adaptive thinking can be spent on thinking
+    // alone, leaving Anthropic to return an empty answer or a compaction block
+    // whose content is null.
+    @Test("adaptive thinking raises a low explicit cap to preserve answer headroom")
+    func adaptiveThinkingRaisesLowExplicitMaxTokens() async throws {
+        var model = Self.reasoningModel
+        model.maxTokens = 128_000
+        var compat = ModelCompat()
+        compat.forceAdaptiveThinking = true
+        model.compat = compat
+        func body(maxTokens: Int?, reasoning: ReasoningLevel?, routeCeiling: Int? = nil) throws -> [String: Any] {
+            let data = try AnthropicProvider.encodeBody(
+                model: model,
+                context: Context(messages: [.user(UserMessage(text: "hi"))]),
+                options: StreamOptions(maxTokens: maxTokens, reasoning: reasoning),
+                maximumOutputTokens: routeCeiling
+            )
+            return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+
+        let high = try body(maxTokens: 1_800, reasoning: .high)
+        #expect((high["thinking"] as? [String: Any])?["type"] as? String == "adaptive")
+        #expect(high["max_tokens"] as? Int == 20_384)
+        #expect(try body(maxTokens: 1_800, reasoning: .low)["max_tokens"] as? Int == 6_048)
+        // The OAuth route ceiling still wins over the floor.
+        #expect(try body(maxTokens: 1_800, reasoning: .high, routeCeiling: 8_000)["max_tokens"] as? Int == 8_000)
+        // Caps already above the floor and requests without thinking are unchanged.
+        #expect(try body(maxTokens: 32_000, reasoning: .high)["max_tokens"] as? Int == 32_000)
+        #expect(try body(maxTokens: 1_800, reasoning: nil)["max_tokens"] as? Int == 1_800)
+    }
+
     @Test("signed thinking block is replayed even when its text is empty")
     func emptyThinkingWithSignaturePreserved() async throws {
         let client = StubSSEClient(body: Self.textSSE)
@@ -774,7 +805,7 @@ struct AnthropicProviderTests {
             options: nil
         ).result()
         let headers = client.lastRequest?.headers ?? [:]
-        #expect(headers["user-agent"] == "claude-cli/2.1.327")
+        #expect(headers["user-agent"] == "claude-cli/2.1.330")
         #expect(headers["x-app"] == "cli")
         #expect(headers["anthropic-beta"]?.contains("claude-code-20250219") == true)
         #expect(headers["anthropic-beta"]?.contains("oauth-2025-04-20") == true)
@@ -835,5 +866,31 @@ struct AnthropicProviderTests {
         #expect(result.usage.reasoning == 7)
         #expect(result.usage.output == 20)
         #expect(result.usage.totalTokens == 160)
+        #expect(result.usage.speed == nil)
+    }
+
+    @Test("usage keeps the speed tier Anthropic reports and persists it")
+    func usageCapturesReportedSpeed() async throws {
+        let body = Self.usageSSE.replacingOccurrences(
+            of: #""ephemeral_1h_input_tokens":40}}"#,
+            with: #""ephemeral_1h_input_tokens":40},"speed":"fast"}"#)
+        let client = StubSSEClient(body: body)
+        let provider = AnthropicProvider(client: client, defaultAPIKey: "k")
+        let s = provider.stream(
+            model: Self.sampleModel,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: nil
+        )
+        for await _ in s {}
+        let result = await s.result()
+        // message_delta carries no speed; the message_start value must survive it.
+        #expect(result.usage.speed == "fast")
+        #expect(result.usage.output == 20)
+
+        let encoded = try JSONEncoder().encode(result.usage)
+        #expect(String(decoding: encoded, as: UTF8.self).contains(#""speed":"fast""#))
+        #expect(try JSONDecoder().decode(Usage.self, from: encoded).speed == "fast")
+        let unreported = try JSONEncoder().encode(Usage(input: 1))
+        #expect(!String(decoding: unreported, as: UTF8.self).contains("speed"))
     }
 }

@@ -36,11 +36,16 @@ enum ProviderImageBudget {
         limits[provider] ?? defaultLimit
     }
 
+    /// An explicit `compat.maxImagesPerRequest` wins; otherwise the table,
+    /// read by the provider the model behaves like. Devin splits its limit
+    /// by the upstream model family.
     static func limit(for model: Model) -> Int {
-        if model.provider == "devin" {
+        if let explicit = model.compat?.maxImagesPerRequest { return max(0, explicit) }
+        let provider = model.behaviorProvider
+        if provider == "devin" {
             return model.id.hasPrefix("claude-") ? devinClaudeLimit : devinLimit
         }
-        return limit(for: model.provider)
+        return limit(for: provider)
     }
 
     static func clamp(_ context: Context, for model: Model) -> Context {

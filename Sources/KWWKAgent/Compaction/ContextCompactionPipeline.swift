@@ -126,6 +126,7 @@ enum ContextCompactionPipeline {
             : max(1, request.config.maxSummaryAttempts)
         var previousCut: Int?
         var lastTokensAfter: Int?
+        var nativeFailed = false
 
         for attemptIndex in 0..<attemptLimit {
             guard let plan = CompactionPlanner.plan(
@@ -137,9 +138,22 @@ enum ContextCompactionPipeline {
             guard previousCut != plan.firstKeptMessageIndex else { break }
             previousCut = plan.firstKeptMessageIndex
 
-            if let native = try await nativeReplacement(plan: plan, request: request,
-                                                        recapTokenBudget: recapTokenBudget) {
-                return native
+            do {
+                if !nativeFailed, let native = try await nativeReplacement(plan: plan, request: request,
+                                                                           recapTokenBudget: recapTokenBudget) {
+                    return native
+                }
+            } catch {
+                // The summary uses the same credentials, so an authentication
+                // failure stays an error; anything else falls back to it.
+                try checkCompactionCancellation(request.cancellation)
+                guard !(error is CancellationError),
+                      ProviderFailure.capture(error).category != .authentication else { throw error }
+                await CompactionUsageCollector.current?.onVerbose?(VerboseEvent(
+                    source: "compaction",
+                    message: "native compaction failed, summarizing instead: \(error.displayDescription)"
+                ))
+                nativeFailed = true
             }
 
             let historySummary = try await summarizeHistory(plan: plan, request: request)
@@ -237,7 +251,7 @@ enum ContextCompactionPipeline {
             return plan.previousSummary
         }
         return try await summarizeInChunks(
-            messages: messages,
+            messages: ToolResultPruner.prune(messages),
             previousSummary: priorDurableSummary(for: plan),
             kind: .history,
             request: request
@@ -285,7 +299,11 @@ enum ContextCompactionPipeline {
         The final \(plan.recentTail.count) transcript records are retained verbatim after
         this summary; summarize only the history preceding that retained tail.
         """
-        let maxTokens = anthropic
+        // Leave maxTokens unset when summaryMaxTokens is 0 (automatic), matching
+        // CompactionSummaryGenerator. Only an explicit positive summaryMaxTokens
+        // caps the Anthropic native request; otherwise the encoder uses the
+        // model/route ceiling.
+        let maxTokens = anthropic && request.config.summaryMaxTokens > 0
             ? min(
                 recapTokenBudget,
                 CompactionSummaryGenerator.outputTokenReserve(
@@ -309,6 +327,7 @@ enum ContextCompactionPipeline {
         )
         guard let native = try await request.config.summaryRetryPolicy.run(cancellation: request.cancellation,
             operation: { try await compact(model, context, instructions, options) }) else { return nil }
+        if let usage = native.usage { CompactionUsageCollector.current?.add(usage) }
         var replacement = await makeReplacement(
             plan: plan,
             historySummary: native.summary,
@@ -340,7 +359,7 @@ enum ContextCompactionPipeline {
     ) async throws -> String? {
         guard !plan.turnPrefixToSummarize.isEmpty else { return nil }
         return try await summarizeInChunks(
-            messages: plan.turnPrefixToSummarize,
+            messages: ToolResultPruner.prune(plan.turnPrefixToSummarize),
             // With no intervening history, this is a later slice of the same
             // active turn. Update its prior prefix summary instead of starting
             // over and discarding the earlier slice. Once history advances,

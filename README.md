@@ -173,7 +173,7 @@ loaded, even while their servers are still connecting.
 Add `kwwk` as a SwiftPM dependency:
 
 ```swift
-.package(url: "https://github.com/EYHN/kwwk", branch: "main"),
+.package(url: "https://github.com/yellowplushq/kwwk", branch: "main"),
 ```
 
 Then depend on the libraries you need:
@@ -384,7 +384,7 @@ session ids are not exposed to the model. The registry is process-local,
 keeps at most 32 terminal children (least recently active evicted first)
 subject to a 16 MiB estimated transcript budget, and does not survive
 application restart; an evicted child cannot be resumed. Each response is
-capped at 64 KiB.
+capped at 32 KiB.
 
 `agent`, `agent_send`, `agent_history`, and the `task_*` tools treat an
 optional argument sent as `null`, `""`, or whitespace exactly like an omitted
@@ -670,9 +670,8 @@ opt in with `ModelCompat.supportsServerCompaction = true`; `false` disables the
 capability. Unsupported routes, smaller Anthropic contexts, or a separate
 compaction model use the local summary pipeline. Native request failures remain
 visible after bounded retries and leave the existing context intact.
-Anthropic native summaries use the recap budget as their output cap (also
-bounded by `summaryMaxTokens` when set); Codex's compact endpoint manages its
-own output size.
+Anthropic native summaries leave the output cap automatic unless
+`summaryMaxTokens` is set; Codex's compact endpoint manages its own output size.
 
 Native payloads are persisted and replayed on subsequent requests. Codex's
 encrypted context keeps its source prefix for switching providers, where normal
@@ -707,6 +706,51 @@ call `registerBuiltinsFromEnvironment(env:)` with an environment snapshot.
 OpenRouter) there are `Models.xaiGrok(id:)`, `Models.groq(id:)`,
 `Models.openRouter(id:)` helpers.
 
+Some behaviour follows the model's `provider` name rather than its wire
+format: how many images a request may carry, whether the model's `maxTokens`
+goes on the wire as an automatic output limit, how much of the window the
+agent reserves for the answer, whether a response's `usage.cost` is taken as
+the billed cost, and the chat-completions defaults for OpenRouter. A gateway
+that relays several vendors under its own provider name keeps a vendor's
+behaviour by setting the matching `ModelCompat` field; each is `nil` by
+default, and `nil` means the value the provider name gives.
+
+| `ModelCompat` field | Controls | When `nil` |
+|---|---|---|
+| `maxImagesPerRequest` | Images per request; `stream()` replaces the oldest beyond it with a note | 90 for `anthropic`, `amazon-bedrock`, `openrouter`; 200 for `openai`, `openai-codex`, `chatgpt-codex`, `google`, `google-vertex`; otherwise 5 |
+| `omitsAutomaticOutputLimit` | Send an output-token limit only when `StreamOptions.maxTokens` is set | `true` for OpenRouter, else `false` |
+| `usesSmallAnswerReserve` | With no automatic limit, the agent reserves 15% of the window (at least 16,384 tokens, at most a quarter of a small window) instead of a quarter | `true` for OpenRouter, else `false` |
+| `trustsReportedCost` | Chat completions: `usage.cost` is the turn's billed cost | `true` for OpenRouter, else `false` |
+| `maxToolCallIdLength` | Longest tool-call id sent; longer ones from another model are hashed | 40 for `openai`, else 64 |
+| `sendsPromptCacheKey` | Chat completions: send the session id as `prompt_cache_key` | Sent to `api.openai.com`, or with long cache retention |
+| `behavesLikeProvider` | The provider name all of the above, the chat-completions defaults (`thinkingFormat`, `cacheControlFormat`, `supportsDeveloperRole`, `sendSessionAffinityHeaders`, `sessionAffinityFormat`, …) and `ProviderAttribution.attributionHeaders(for:)` read | `Model.provider` |
+
+An explicit field wins over `behavesLikeProvider`, which wins over
+`provider`. Neither changes what `provider` identifies: registration,
+credentials, catalog lookups, a subagent's `model` override and the
+same-model checks on replayed history still read `provider`, so an assistant
+turn recorded under one provider name is replayed to another as a different
+model's turn.
+
+```swift
+var compat = ModelCompat()
+compat.behavesLikeProvider = "openrouter"   // everything OpenRouter's name gives
+// or field by field:
+compat.thinkingFormat = "openrouter"
+compat.cacheControlFormat = "anthropic"     // anthropic/* ids only
+compat.sendSessionAffinityHeaders = true
+compat.sessionAffinityFormat = "openrouter"
+compat.maxImagesPerRequest = 90
+compat.omitsAutomaticOutputLimit = true
+compat.usesSmallAnswerReserve = true
+compat.trustsReportedCost = true
+let model = Model(
+    id: "anthropic/claude-sonnet-5", api: "openai-completions",
+    provider: "my-gateway", baseURL: "https://gateway.example/v1",
+    compat: compat
+)
+```
+
 To use a subscription (OAuth) token instead of a raw API key, drive the
 flow via `KWWKAI.OAuth` / `OAuthLogin` — the same code path the CLI's
 in-session `/login` command uses.
@@ -721,7 +765,7 @@ conversation in `x-opencode-session`, which Go requires. The key travels
 with the returned `ResolvedAuth`, so registering the plan again for another
 key never changes a running session's. An exported `OPENCODE_API_KEY` serves
 both plans and is read as Zen unless the model names the plan:
-`kwwk --model opencode-go/glm-5.2`.
+`kwwk --model opencode-go/glm-5.3`.
 
 ### Updating the model catalog
 

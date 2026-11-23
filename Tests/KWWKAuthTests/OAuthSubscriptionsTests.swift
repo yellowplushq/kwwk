@@ -30,6 +30,8 @@ struct OAuthSubscriptionsTests {
         #expect(OAuthSubscriptions.provider(id: "trae")?.name == "Trae CN")
         #expect(OAuthSubscriptions.provider(id: "trae-intl")?.name == "Trae")
         #expect(OAuthSubscriptions.refresher(providerId: "raccoon") is RaccoonOAuthProvider)
+        #expect(OAuthSubscriptions.refresher(providerId: "agy") is AgyOAuthProvider)
+        #expect(OAuthSubscriptions.provider(id: "agy")?.name == "Antigravity CLI")
         #expect((OAuthSubscriptions.refresher(providerId: "kimi-coding") as? KimiCodingOAuthProvider)?.site == .china)
         #expect((OAuthSubscriptions.refresher(providerId: "kimi-coding-ai") as? KimiCodingOAuthProvider)?.site == .global)
         #expect(OAuthSubscriptions.provider(id: "kimi-coding-ai")?.name == "Kimi For Coding Global")

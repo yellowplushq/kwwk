@@ -9,7 +9,8 @@ extension AnthropicProvider {
         options: StreamOptions?,
         systemPromptPrefix: String? = nil,
         maximumOutputTokens: Int? = nil,
-        fallbackEnabled: Bool = false
+        fallbackEnabled: Bool = false,
+        wireModelID: String? = nil
     ) throws -> Data {
         var context = context
         context.messages = TransformMessages.normalize(
@@ -28,7 +29,7 @@ extension AnthropicProvider {
             throw AnthropicRequestEncodingError.invalidMaxTokens(maxTokens)
         }
         var root: [String: Any] = [
-            "model": model.id,
+            "model": wireModelID ?? model.id,
             "stream": true,
         ]
         if fallbackEnabled {
@@ -51,6 +52,19 @@ extension AnthropicProvider {
                 // from the unconstrained `max` effort.
                 root["thinking"] = ["type": "adaptive", "display": "summarized"]
                 root["output_config"] = ["effort": adaptiveEffort(model, reasoning)]
+                // Adaptive thinking spends the same max_tokens as the answer,
+                // and Claude picks how much to think. Apply the budget
+                // branch's floor so a low explicit caller cap (e.g. a small
+                // summaryMaxTokens) cannot be spent on thinking alone:
+                // Anthropic then ends the turn with an empty answer, or a
+                // compaction block whose content is null. The route ceiling
+                // still wins.
+                let expectedThinking = options?.thinkingBudgets?.budget(for: reasoning)
+                    ?? defaultThinkingBudget(for: reasoning)
+                maxTokens = min(
+                    max(maxTokens, addingWithoutOverflow(expectedThinking, minimumAnswerHeadroomTokens)),
+                    routeCeiling
+                )
                 thinkingEnabled = true
             } else {
                 var thinkingBudget = options?.thinkingBudgets?.budget(for: reasoning)
@@ -201,6 +215,14 @@ extension AnthropicProvider {
             }
             messages.append(encoded)
         }
+        if endsWithNativeCompaction(context.messages),
+           messages.last?["role"] as? String == "assistant" {
+            // A compaction that summarized the whole transcript leaves only
+            // the replayed compaction block, which is an assistant turn.
+            // Models without prefill reject an assistant-final request, so
+            // ask to continue. This synthetic turn is not persisted.
+            messages.append(["role": "user", "content": [["type": "text", "text": continueAfterCompaction]]])
+        }
         messages.append(contentsOf: pendingToolChanges)
         if context.messages.contains(where: {
             if case .user(let user) = $0 { return user.nativeCompaction?.api == "anthropic-messages" }
@@ -224,6 +246,28 @@ extension AnthropicProvider {
         }
         root["messages"] = messages
         return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+    }
+
+    static let continueAfterCompaction = "Continue the task from the compaction summary above."
+
+    /// Whether the last conversational message is a replayed Anthropic
+    /// compaction, which is encoded as an assistant turn. System messages
+    /// only carry tool changes and never end a conversation.
+    static func endsWithNativeCompaction(_ messages: [Message], model: Model? = nil) -> Bool {
+        let last = messages.last { if case .system = $0 { return false }; return true }
+        guard case .user(let user)? = last,
+              let native = user.nativeCompaction,
+              native.api == "anthropic-messages" else { return false }
+        return model.map { native.canReplay(with: $0) } ?? true
+    }
+
+    /// Whether the last conversational message will be encoded as an assistant
+    /// turn for `model` — either a regular assistant reply or a replayable
+    /// Anthropic compaction.
+    static func endsWithAssistantTurn(_ messages: [Message], model: Model) -> Bool {
+        let last = messages.last { if case .system = $0 { return false }; return true }
+        if case .assistant? = last { return true }
+        return endsWithNativeCompaction(messages, model: model)
     }
 
     static let inlineToolsBeta = "inline-tools-2026-09-15"

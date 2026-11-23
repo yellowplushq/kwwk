@@ -22,12 +22,13 @@ struct RefreshErrorTests {
     }
 
     @Test("A refused grant parks the login; a 403, 429, 5xx, transport and unreadable answers do not", arguments: [
-        "anthropic", "openai-codex", "kimi-coding", "xai", "cursor",
+        "anthropic", "openai-codex", "agy", "kimi-coding", "xai", "cursor",
     ])
     func classification(providerId: String) async throws {
         let provider: any OAuthProvider = switch providerId {
         case "anthropic": AnthropicOAuthProvider()
         case "openai-codex": OpenAICodexOAuthProvider()
+        case "agy": AgyOAuthProvider()
         case "kimi-coding": KimiCodingOAuthProvider(identity: .init(
             deviceId: "d",
             deviceName: "n",

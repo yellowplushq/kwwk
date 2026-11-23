@@ -82,6 +82,12 @@ public enum ModelsCatalog {
             let kiro = loadBundledArray("kiro-models")
             if !kiro.isEmpty { out["kiro"] = kiro }
         }
+        // Antigravity CLI (`agy`) routes through AirRelay; this seed mirrors
+        // `agy models` so catalog lookups and BYOK stores work out of the box
+        // (while the retired `antigravity` / `google-antigravity` ids stay absent).
+        if out[AgyOAuth.providerId] == nil {
+            out[AgyOAuth.providerId] = AgyModels.seed
+        }
         // Qoder's roster is the account's own and every request is built
         // from the live listing; the bundled rows seed the model picker, the
         // same ones for both sites.

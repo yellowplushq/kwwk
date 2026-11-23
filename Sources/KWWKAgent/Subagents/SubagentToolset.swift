@@ -38,6 +38,7 @@ public func createSubagentToolset(
     bashEnvironment: [String: String],
     fileAccessPolicy: FileAccessPolicy = .unrestricted,
     contextFiles: [(path: String, content: String)] = [],
+    subagentSystemPrompt: String? = nil,
     authResolver: (@Sendable (Model, String?) async throws -> ResolvedProviderAuth?)? = nil,
     bashDefaultTimeoutSeconds: Int = 120,
     bashMaxTimeoutSeconds: Int = 600,
@@ -61,7 +62,8 @@ public func createSubagentToolset(
         projectContextFiles: contextFiles,
         availableSkills: [],
         fallbackFileAccessPolicy: fileAccessPolicy,
-        allowedModelOverrides: []
+        allowedModelOverrides: [],
+        subagentSystemPrompt: subagentSystemPrompt
     )
     let definitions = subagents ?? SubagentDefinition.builtins(for: childTools)
     let historyStore = SubagentHistoryStore()

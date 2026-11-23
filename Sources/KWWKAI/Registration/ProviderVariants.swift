@@ -170,10 +170,10 @@ public enum ProviderVariants {
     /// Claude Code CLI version advertised on the OAuth identity headers. The
     /// subscription endpoint stamps requests as Claude Code via `user-agent`
     /// and `x-app`, plus a `claude-code-20250219` beta prefix.
-    /// Matches the npm latest (2026-11-17).
+    /// Matches the npm latest (2026-11-20).
     /// Older versions are rejected with claude_code_version_too_old (5.2 needs
     /// 2.1.290 or newer).
-    public static let claudeCodeVersion = "2.1.327"
+    public static let claudeCodeVersion = "2.1.330"
 
     public static func anthropicOAuth(
         accessToken: String? = nil,
@@ -201,6 +201,43 @@ public enum ProviderVariants {
             authHeaderBuilder: { token in ["authorization": "Bearer \(token)"] },
             systemPromptPrefix: "You are Claude Code, Anthropic's official CLI for Claude.",
             maximumOutputTokens: AnthropicProvider.claudeCodeMaximumOutputTokens
+        )
+    }
+
+    // MARK: - Antigravity CLI via AirRelay (Anthropic Messages wire)
+    //
+    // AirRelay exposes an Anthropic Messages endpoint (`/v1/messages`) backed
+    // by the real `agy` CLI (`agy acp`), forwarding text and base64 image
+    // blocks in both user messages and `tool_result` blocks for vision-capable
+    // models. Requests authenticate with the user's Google OAuth access token
+    // as a Bearer header plus an optional `x-relay-secret`, prefix model slugs
+    // with `agy/` on the wire, and disable Anthropic-specific features the
+    // relay does not support.
+    public static func agyAirRelay(
+        baseURL: URL,
+        accessToken: String? = nil,
+        relaySecret: String? = nil,
+        client: HTTPClient = URLSessionHTTPClient(),
+        apiVersion: String = "2023-06-01",
+        api: String = "anthropic-messages",
+        modelPrefix: String = AgyModels.modelPrefix
+    ) -> AnthropicProvider {
+        let normalizedString = AgyModels.normalizeBaseURL(baseURL.absoluteString)
+        let normalizedURL = URL(string: normalizedString) ?? baseURL
+        var extra: [String: String] = [:]
+        if let relaySecret, !relaySecret.isEmpty {
+            extra["x-relay-secret"] = relaySecret
+        }
+        return AnthropicProvider(
+            api: api,
+            client: client,
+            defaultBaseURL: normalizedURL,
+            defaultAPIKey: accessToken,
+            apiVersion: apiVersion,
+            extraHeaders: extra,
+            authHeaderBuilder: { token in ["Authorization": bearerHeaderValue(token)] },
+            modelIDTransform: { model in AgyModels.wireModelId(for: model.id, prefix: modelPrefix) },
+            compatTransform: { AgyModels.applyCompat($0) }
         )
     }
 

@@ -55,6 +55,10 @@ public struct CodingAgentConfig: Sendable {
     /// Project/user context files to inject into the synthesized system prompt.
     /// Empty by default so library callers do not implicitly read from `cwd`.
     public var contextFiles: [(path: String, content: String)]
+    /// Host rules added to every subagent's system prompt as
+    /// `# Rules from the parent environment`, ranked above the task prompt.
+    /// `nil` (default) leaves subagent prompts unchanged.
+    public var subagentSystemPrompt: String?
     /// Skill directories to scan for `<available_skills>`. Empty by default so
     /// library callers do not implicitly read project or user config.
     public var skillDirectories: [String]
@@ -113,6 +117,7 @@ public struct CodingAgentConfig: Sendable {
         fileAccessPolicy: FileAccessPolicy = .unrestricted,
         systemPrompt: String? = nil,
         contextFiles: [(path: String, content: String)] = [],
+        subagentSystemPrompt: String? = nil,
         skillDirectories: [String] = [],
         backgroundManager: BackgroundTaskManager? = BackgroundTaskManager(),
         backgroundAutoContinue: Bool = true,
@@ -138,6 +143,7 @@ public struct CodingAgentConfig: Sendable {
         self.fileAccessPolicy = fileAccessPolicy
         self.systemPrompt = systemPrompt
         self.contextFiles = contextFiles
+        self.subagentSystemPrompt = subagentSystemPrompt
         self.skillDirectories = skillDirectories
         self.backgroundManager = backgroundManager
         self.backgroundAutoContinue = backgroundAutoContinue
@@ -259,7 +265,8 @@ public func makeCodingAgent(_ config: CodingAgentConfig) async -> CodingAgent {
         projectContextFiles: config.contextFiles,
         availableSkills: availableSkills,
         fallbackFileAccessPolicy: config.fileAccessPolicy,
-        allowedModelOverrides: config.allowedSubagentModels
+        allowedModelOverrides: config.allowedSubagentModels,
+        subagentSystemPrompt: config.subagentSystemPrompt
     )
     if !config.subagents.isEmpty {
         let subagentHistoryStore = SubagentHistoryStore()

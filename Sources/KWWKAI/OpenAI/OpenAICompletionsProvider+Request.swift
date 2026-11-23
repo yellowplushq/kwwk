@@ -70,8 +70,9 @@ extension OpenAICompletionsProvider {
         // (e.g. OpenRouter `anthropic/*`) — those are different, conflicting wire
         // shapes. Only apply native cache when we did NOT apply the anthropic one.
         let openAINativeCache = compat.cacheControlFormat != "anthropic"
-            && (model.baseURL.contains("api.openai.com")
-                || (retention == .long && compat.supportsLongCacheRetention))
+            && (model.compat?.sendsPromptCacheKey
+                ?? (model.baseURL.contains("api.openai.com")
+                    || (retention == .long && compat.supportsLongCacheRetention)))
         if openAINativeCache, retention != .none,
            let sid = clampOpenAIPromptCacheKey(options?.sessionId) {
             root["prompt_cache_key"] = sid
@@ -117,7 +118,7 @@ extension OpenAICompletionsProvider {
 
     static func resolveCompat(_ model: Model) -> ResolvedCompletionsCompat {
         let url = model.baseURL.lowercased()
-        let provider = model.provider
+        let provider = model.behaviorProvider
         func has(_ s: String) -> Bool { url.contains(s) }
         let isZai = provider == "zai" || provider == "zai-coding-cn" || has("api.z.ai") || has("bigmodel.cn")
         let isTogether = provider == "together" || has("api.together.ai") || has("api.together.xyz")
@@ -135,8 +136,11 @@ extension OpenAICompletionsProvider {
         let isNonStandard = isNvidia || isCerebras || isGrok || isTogether || isChutes
             || isDeepSeek || isZai || isMoonshot || isOpencode || isCloudflareWorkers
             || isCfGateway || isAntLing
-        let openRouterDeveloperRole = isOpenRouter
-            && (model.id.hasPrefix("anthropic/") || model.id.hasPrefix("openai/"))
+        // The developer role is OpenAI's; other hosts' chat templates often
+        // reject it, and every host takes system. Only OpenAI's own API gets
+        // developer by default, as in pi (b82477b, pi #10741), whose catalog
+        // no longer carries `supportsDeveloperRole: false`.
+        let isOpenAI = provider == "openai" || has("api.openai.com")
         let useMaxTokens = isChutes || isMoonshot || isCfGateway || isTogether || isNvidia || isAntLing
 
         let detectedReasoningEffort = !isGrok && !isZai && !isMoonshot && !isTogether
@@ -151,8 +155,7 @@ extension OpenAICompletionsProvider {
         let c = model.compat
         return ResolvedCompletionsCompat(
             supportsStore: c?.supportsStore ?? !isNonStandard,
-            supportsDeveloperRole: c?.supportsDeveloperRole
-                ?? (openRouterDeveloperRole || (!isNonStandard && !isOpenRouter)),
+            supportsDeveloperRole: c?.supportsDeveloperRole ?? isOpenAI,
             supportsReasoningEffort: c?.supportsReasoningEffort ?? detectedReasoningEffort,
             supportsUsageInStreaming: c?.supportsUsageInStreaming ?? true,
             maxTokensField: c?.maxTokensField ?? (useMaxTokens ? "max_tokens" : "max_completion_tokens"),
@@ -458,8 +461,16 @@ extension OpenAICompletionsProvider {
             toolEntries[toolEntries.count - 1]["cache_control"] = cacheControl
             tools = toolEntries
         }
+        // The trailing breakpoint goes on the newest message that can carry
+        // one, tool results included. In a tool loop the history grows by
+        // `tool` messages and text-less assistant `tool_calls` turns; skipping
+        // `tool` left the marker on the last message with prose, so every
+        // turn after it was billed as uncached input (measured 2026-11-20 on
+        // an Opus Agent: the read stayed at 42k for 15 minutes while the
+        // prompt grew to 140k), and Anthropic's 20-block lookback then missed
+        // the old entry once the marker finally moved.
         for index in messages.indices.reversed() {
-            guard ["user", "assistant"].contains(messages[index]["role"] as? String) else { continue }
+            guard ["user", "assistant", "tool"].contains(messages[index]["role"] as? String) else { continue }
             if addCacheControl(cacheControl, toTextContentOf: &messages[index]) { break }
         }
     }
