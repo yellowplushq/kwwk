@@ -201,7 +201,6 @@ extension AnthropicProvider {
             }
             messages.append(encoded)
         }
-        messages.append(contentsOf: pendingToolChanges)
         if endsWithNativeCompaction(context.messages),
            messages.last?["role"] as? String == "assistant" {
             // A compaction that summarized the whole transcript leaves only
@@ -210,6 +209,7 @@ extension AnthropicProvider {
             // ask to continue. This synthetic turn is not persisted.
             messages.append(["role": "user", "content": [["type": "text", "text": continueAfterCompaction]]])
         }
+        messages.append(contentsOf: pendingToolChanges)
         if context.messages.contains(where: {
             if case .user(let user) = $0 { return user.nativeCompaction?.api == "anthropic-messages" }
             return false
@@ -239,10 +239,21 @@ extension AnthropicProvider {
     /// Whether the last conversational message is a replayed Anthropic
     /// compaction, which is encoded as an assistant turn. System messages
     /// only carry tool changes and never end a conversation.
-    static func endsWithNativeCompaction(_ messages: [Message]) -> Bool {
+    static func endsWithNativeCompaction(_ messages: [Message], model: Model? = nil) -> Bool {
         let last = messages.last { if case .system = $0 { return false }; return true }
-        guard case .user(let user)? = last else { return false }
-        return user.nativeCompaction?.api == "anthropic-messages"
+        guard case .user(let user)? = last,
+              let native = user.nativeCompaction,
+              native.api == "anthropic-messages" else { return false }
+        return model.map { native.canReplay(with: $0) } ?? true
+    }
+
+    /// Whether the last conversational message will be encoded as an assistant
+    /// turn for `model` — either a regular assistant reply or a replayable
+    /// Anthropic compaction.
+    static func endsWithAssistantTurn(_ messages: [Message], model: Model) -> Bool {
+        let last = messages.last { if case .system = $0 { return false }; return true }
+        if case .assistant? = last { return true }
+        return endsWithNativeCompaction(messages, model: model)
     }
 
     static let inlineToolsBeta = "inline-tools-2026-09-15"

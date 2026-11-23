@@ -196,6 +196,56 @@ struct NativeCompactionTests {
         #expect(!text.contains(AnthropicProvider.continueAfterCompaction))
     }
 
+    @Test func anthropicBareCompactionWithAnchoredToolChangesAppendsContinueTurn() throws {
+        var model = Self.claude
+        var compat = ModelCompat()
+        compat.supportsMidConvoSystemMessages = true
+        compat.supportsMidConvoToolChanges = true
+        model.compat = compat
+        let read = Tool(name: "read", description: "read files", parameters: ["type": "object"])
+        let write = Tool(name: "write", description: "write files", parameters: ["type": "object"])
+        let encoded = try AnthropicProvider.encodeBody(
+            model: model,
+            context: Context(
+                messages: [
+                    Self.bareRecap(),
+                    .system(SystemMessage(toolsAdded: [read])),
+                    .system(SystemMessage(toolsAdded: [write])),
+                ],
+                tools: [read, write]
+            ),
+            options: nil
+        )
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: encoded)
+        let messages = try #require(body["messages"]?.arrayValue)
+        #expect(messages.compactMap { $0["role"] } == [.string("assistant"), .string("user"), .string("system")])
+        #expect(messages[1]["content"]?.arrayValue?.first?["text"] == .string(AnthropicProvider.continueAfterCompaction))
+    }
+
+    @Test func anthropicCompactIgnoresTrailingSystemAfterAssistant() async throws {
+        let client = StubSSEClient(body: #"{"stop_reason":"compaction","content":[{"type":"compaction","content":"summary"}]}"#)
+        let tool = Tool(name: "read", description: "read files", parameters: ["type": "object"])
+        _ = try await AnthropicProvider(client: client).compact(
+            model: Self.claude,
+            context: Context(messages: [
+                .assistant(AssistantMessage(
+                    content: [.text(TextContent(text: "notes\n"))],
+                    api: Self.claude.api,
+                    provider: Self.claude.provider,
+                    model: Self.claude.id
+                )),
+                .system(SystemMessage(toolsRemoved: [tool.name])),
+            ]),
+            instructions: "",
+            options: nil
+        )
+        let body = try JSONDecoder().decode([String: JSONValue].self, from: #require(client.lastRequest?.body))
+        let last = try #require(body["messages"]?.arrayValue?.last)
+        #expect(last["role"] == "user")
+        let text = String(decoding: try JSONEncoder().encode(last), as: UTF8.self)
+        #expect(text.contains("Compact the preceding conversation"))
+    }
+
     @Test func explicitResponsesV1RouteStillWorks() async throws {
         var model = Self.codex
         model.api = "openai-responses"

@@ -79,10 +79,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         guard Self.supportsNativeCompaction(model: model, baseURL: base) else { return nil }
         let fallbackEnabled = Self.usesServerSideFallback(model: model, url: url, options: options)
         var nativeContext = context
-        let assistantFinal: Bool
-        if case .assistant? = nativeContext.messages.last { assistantFinal = true }
-        else { assistantFinal = Self.endsWithNativeCompaction(nativeContext.messages) }
-        if assistantFinal {
+        if Self.endsWithAssistantTurn(nativeContext.messages, model: model) {
             // Do not let an assistant-final transcript become an unsupported
             // prefill; a replayed compaction is an assistant turn too, and
             // this asks to compact rather than the encoder's request to
