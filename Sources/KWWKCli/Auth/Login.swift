@@ -53,6 +53,11 @@ let loginProviders: [LoginEntry] = [
         flow: .oauth
     ),
     LoginEntry(
+        id: AgyOAuth.providerId,
+        display: "Antigravity CLI (Google sign-in via AirRelay)",
+        flow: .oauth
+    ),
+    LoginEntry(
         id: "qoder",
         display: "Qoder (qoder.com subscription)",
         flow: .oauth

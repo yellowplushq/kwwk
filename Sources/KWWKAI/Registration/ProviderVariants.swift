@@ -204,6 +204,41 @@ public enum ProviderVariants {
         )
     }
 
+    // MARK: - Antigravity CLI via AirRelay (Anthropic Messages wire)
+    //
+    // AirRelay exposes an Anthropic Messages endpoint (`/v1/messages`) backed
+    // by the real `agy` CLI. Requests authenticate with the user's Google OAuth
+    // access token as a Bearer header plus an optional `x-relay-secret`, prefix
+    // model slugs with `agy/` on the wire, and disable Anthropic-specific
+    // features the relay does not support.
+    public static func agyAirRelay(
+        baseURL: URL,
+        accessToken: String? = nil,
+        relaySecret: String? = nil,
+        client: HTTPClient = URLSessionHTTPClient(),
+        apiVersion: String = "2023-06-01",
+        api: String = "anthropic-messages",
+        modelPrefix: String = AgyModels.modelPrefix
+    ) -> AnthropicProvider {
+        let normalizedString = AgyModels.normalizeBaseURL(baseURL.absoluteString)
+        let normalizedURL = URL(string: normalizedString) ?? baseURL
+        var extra: [String: String] = [:]
+        if let relaySecret, !relaySecret.isEmpty {
+            extra["x-relay-secret"] = relaySecret
+        }
+        return AnthropicProvider(
+            api: api,
+            client: client,
+            defaultBaseURL: normalizedURL,
+            defaultAPIKey: accessToken,
+            apiVersion: apiVersion,
+            extraHeaders: extra,
+            authHeaderBuilder: { token in ["Authorization": bearerHeaderValue(token)] },
+            modelIDTransform: { model in AgyModels.wireModelId(for: model.id, prefix: modelPrefix) },
+            compatTransform: { AgyModels.applyCompat($0) }
+        )
+    }
+
     // MARK: - Google Vertex AI (Gemini)
     //
     // Vertex serves Gemini under `/v1/projects/{project}/locations/{location}/

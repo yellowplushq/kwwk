@@ -312,11 +312,19 @@ public actor OAuthManager {
     }
 
     private static func baseURL(forOAuthId providerId: String, credentials: OAuthCredentials?) -> String? {
-        guard providerId == "github-copilot",
-              case .string(let endpoint) = credentials?.extras["endpoint"] ?? .null,
-              !endpoint.isEmpty else {
-            return nil
+        if providerId == "github-copilot",
+           case .string(let endpoint) = credentials?.extras["endpoint"] ?? .null,
+           !endpoint.isEmpty {
+            return endpoint
         }
-        return endpoint
+        if providerId == AgyOAuth.providerId {
+            for key in ["baseUrl", "relayUrl"] {
+                if case .string(let raw) = credentials?.extras[key] ?? .null,
+                   !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return AgyModels.normalizeBaseURL(raw)
+                }
+            }
+        }
+        return nil
     }
 }

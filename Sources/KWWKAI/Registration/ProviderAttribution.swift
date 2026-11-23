@@ -16,6 +16,7 @@ public enum ProviderAttribution {
     /// registers (`chatgpt-codex` wire scope, `openai-codex` catalog key,
     /// `openai-compatible` custom endpoints).
     public static let displayNames: [String: String] = [
+        "agy": "Antigravity CLI",
         "anthropic": "Anthropic",
         "amazon-bedrock": "Amazon Bedrock",
         "ant-ling": "Ant Ling",

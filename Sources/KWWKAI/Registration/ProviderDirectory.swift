@@ -128,6 +128,13 @@ public let providerDirectory: [ProviderDescriptor] = [
         formTitle: nil
     ),
     ProviderDescriptor(
+        storeId: AgyOAuth.providerId,
+        scope: AgyOAuth.providerId,
+        catalogKey: AgyOAuth.providerId,
+        displayName: AgyOAuth.name,
+        formTitle: nil
+    ),
+    ProviderDescriptor(
         storeId: "qoder",
         scope: "qoder",
         catalogKey: "qoder",

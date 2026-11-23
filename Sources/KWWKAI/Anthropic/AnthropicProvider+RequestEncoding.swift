@@ -9,7 +9,8 @@ extension AnthropicProvider {
         options: StreamOptions?,
         systemPromptPrefix: String? = nil,
         maximumOutputTokens: Int? = nil,
-        fallbackEnabled: Bool = false
+        fallbackEnabled: Bool = false,
+        wireModelID: String? = nil
     ) throws -> Data {
         var context = context
         context.messages = TransformMessages.normalize(
@@ -28,7 +29,7 @@ extension AnthropicProvider {
             throw AnthropicRequestEncodingError.invalidMaxTokens(maxTokens)
         }
         var root: [String: Any] = [
-            "model": model.id,
+            "model": wireModelID ?? model.id,
             "stream": true,
         ]
         if fallbackEnabled {
