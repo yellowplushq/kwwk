@@ -214,7 +214,9 @@ struct AgyAirRelayTests {
         #expect(skipped == nil)
         #expect(notices.messages.contains { $0.contains("baseUrl") })
 
-        // With baseUrl + relaySecret: registers AirRelay AnthropicProvider scoped to "agy".
+        // With baseUrl (and even if extras carries a stray relaySecret):
+        // registers AirRelay AnthropicProvider scoped to "agy" and never
+        // forwards a credential-stored relaySecret as x-relay-secret.
         let storeWithURL = OAuthStore()
         try await storeWithURL.set(
             OAuthCredentials(
@@ -223,7 +225,7 @@ struct AgyAirRelayTests {
                 expires: .max,
                 extras: [
                     "baseUrl": .string("https://relay.airbuild.example/v1"),
-                    "relaySecret": .string("sec-123"),
+                    "relaySecret": .string("must-not-be-forwarded"),
                 ]
             ),
             for: "agy"
@@ -252,7 +254,7 @@ struct AgyAirRelayTests {
         let registered = await APIRegistry.shared.provider(scope: "agy", api: "anthropic-messages") as? AnthropicProvider
         #expect(registered != nil)
         #expect(registered?.defaultBaseURL.absoluteString == "https://relay.airbuild.example")
-        #expect(registered?.extraHeaders["x-relay-secret"] == "sec-123")
+        #expect(registered?.extraHeaders["x-relay-secret"] == nil)
         #expect(registered?.apiVersion == "2023-06-01")
     }
 }

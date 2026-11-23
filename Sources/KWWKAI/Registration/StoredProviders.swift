@@ -585,12 +585,15 @@ private func registerAgy(
         _ = try? await manager.apiKey(for: AgyOAuth.providerId)
     }
 
-    let relaySecret = stringExtra(creds, "relaySecret")
+    // Never read a relay secret from stored user credentials — relay secrets
+    // belong on the server/gateway side (or explicit programmatic
+    // `ProviderVariants.agyAirRelay(relaySecret:)` callers), never distributed
+    // to or persisted in client credential stores.
     await APIRegistry.shared.register(
         ProviderVariants.agyAirRelay(
             baseURL: baseURL,
             accessToken: nil,
-            relaySecret: relaySecret
+            relaySecret: nil
         ),
         scope: AgyOAuth.providerId
     )
