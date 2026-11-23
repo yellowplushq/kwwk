@@ -390,6 +390,24 @@ public final class ToolCatalog: Sendable {
         }
     }
 
+    /// The loaded tools that `query` matches, best first: ranked among all
+    /// registered tools, as `search` would rank them were they not loaded.
+    /// Loads nothing.
+    public func loadedMatches(query: String, limit: Int) -> [String] {
+        let shared = registryState
+        return state.withLockedValue { state in
+            state.pruneRemoved(removedAt: shared.removedAt)
+            let loadedNames = Set(state.loaded.map(\.name))
+            guard !loadedNames.isEmpty else { return [] }
+            return ToolSearchRanker()
+                .rank(query: query, documents: shared.tools.map(ToolSearchDocument.init(tool:)), limit: shared.tools.count)
+                .map(\.name)
+                .filter { loadedNames.contains($0) }
+                .prefix(limit)
+                .map { $0 }
+        }
+    }
+
     /// Sources that cannot provide tools right now.
     public func unavailableSources() async -> [ToolSourceStatus] {
         await registry.unavailable()
@@ -469,6 +487,22 @@ public func makeToolSearchTool(catalog: ToolCatalog) -> AgentTool {
             try cancellation?.throwIfCancelled()
             let note = tools.count < limit ? unavailableNote(await catalog.unavailableSources()) : nil
             guard !tools.isEmpty else {
+                // A search for tools that are already loaded finds nothing to
+                // load; saying so keeps the model from deciding they are gone.
+                let loaded = catalog.loadedMatches(query: query, limit: limit)
+                if !loaded.isEmpty {
+                    return AgentToolResult(
+                        content: [.text(TextContent(
+                            text: "Already loaded (call directly): " + loaded.joined(separator: ", ")
+                                + (note.map { "\n\n" + $0 } ?? "")
+                        ))],
+                        details: .object([
+                            "loaded": .array([]),
+                            "alreadyLoaded": .array(loaded.map { .string($0) }),
+                        ]),
+                        uiDisplay: ["already loaded \(loaded.joined(separator: ", "))"]
+                    )
+                }
                 return AgentToolResult(
                     content: [.text(TextContent(text: "No matching tools found." + (note.map { "\n\n" + $0 } ?? "")))],
                     details: .object(["loaded": .array([])]),

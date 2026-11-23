@@ -121,6 +121,42 @@ struct ToolCatalogLifecycleTests {
         #expect(plain.text == "No matching tools found.")
     }
 
+    @Test("tool_search names the matching tools that are already loaded instead of finding none")
+    func alreadyLoaded() async throws {
+        let catalog = ToolCatalog(unavailableSources: {
+            [ToolSourceStatus(name: "linear_work", reason: "requires authorization")]
+        })
+        catalog.setTools([
+            deferredTool("mcp__cloudflare__docs", "search cloudflare docs"),
+            deferredTool("mcp__cloudflare__workers_list", "list cloudflare workers"),
+            deferredTool("mcp__a__other", "issue search"),
+        ])
+        let search = catalog.searchTool
+        let first = try await search.execute("s1", ["query": "cloudflare"], nil, nil)
+        #expect(Set(catalog.tools.map(\.name)) == ["mcp__cloudflare__docs", "mcp__cloudflare__workers_list"])
+        guard case .object(let loadedFirst)? = first.details, case .array(let names)? = loadedFirst["loaded"] else {
+            throw CancellationError()
+        }
+        #expect(names.count == 2)
+
+        let again = try await search.execute("s2", ["query": "cloudflare docs"], nil, nil)
+        guard case .text(let text)? = again.content.first else { throw CancellationError() }
+        #expect(text.text == "Already loaded (call directly): mcp__cloudflare__docs, mcp__cloudflare__workers_list"
+            + "\n\nNot connected: linear_work (requires authorization)")
+        #expect(again.details == .object([
+            "loaded": .array([]),
+            "alreadyLoaded": .array([.string("mcp__cloudflare__docs"), .string("mcp__cloudflare__workers_list")]),
+        ]))
+        #expect(catalog.loadedMatches(query: "docs", limit: 1) == ["mcp__cloudflare__docs"])
+        // Nothing new was loaded.
+        #expect(Set(catalog.tools.map(\.name)) == ["mcp__cloudflare__docs", "mcp__cloudflare__workers_list"])
+        #expect(catalog.loadedMatches(query: "issue", limit: 8).isEmpty)
+
+        let none = try await search.execute("s3", ["query": "zzz"], nil, nil)
+        guard case .text(let empty)? = none.content.first else { throw CancellationError() }
+        #expect(empty.text.hasPrefix("No matching tools found."))
+    }
+
     @Test("compaction unloads catalog tools not called since the last compaction")
     func compactionUnloads() async throws {
         let faux = await registerFauxProvider()
