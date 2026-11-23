@@ -173,7 +173,7 @@ public enum ProviderVariants {
     /// Matches the npm latest (2026-11-20).
     /// Older versions are rejected with claude_code_version_too_old (5.2 needs
     /// 2.1.290 or newer).
-    public static let claudeCodeVersion = "2.1.330"
+    public static let claudeCodeVersion = "2.1.331"
 
     public static func anthropicOAuth(
         accessToken: String? = nil,
