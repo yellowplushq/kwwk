@@ -207,10 +207,12 @@ public enum ProviderVariants {
     // MARK: - Antigravity CLI via AirRelay (Anthropic Messages wire)
     //
     // AirRelay exposes an Anthropic Messages endpoint (`/v1/messages`) backed
-    // by the real `agy` CLI. Requests authenticate with the user's Google OAuth
-    // access token as a Bearer header plus an optional `x-relay-secret`, prefix
-    // model slugs with `agy/` on the wire, and disable Anthropic-specific
-    // features the relay does not support.
+    // by the real `agy` CLI (`agy acp`), forwarding text and base64 image
+    // blocks in both user messages and `tool_result` blocks for vision-capable
+    // models. Requests authenticate with the user's Google OAuth access token
+    // as a Bearer header plus an optional `x-relay-secret`, prefix model slugs
+    // with `agy/` on the wire, and disable Anthropic-specific features the
+    // relay does not support.
     public static func agyAirRelay(
         baseURL: URL,
         accessToken: String? = nil,

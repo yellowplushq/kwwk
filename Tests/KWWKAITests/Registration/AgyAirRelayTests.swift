@@ -158,42 +158,191 @@ struct AgyAirRelayTests {
         #expect(body["model"] as? String == "agy/claude-sonnet-5-5-high")
     }
 
-    @Test("ModelsCatalog ships agy models with text-only input and disabled unsupported compat flags while antigravity stays absent")
+    @Test("ModelsCatalog ships vision-capable agy models with [.text, .image], gpt-oss as text-only, and disabled unsupported compat flags while antigravity stays absent")
     func catalogAndModelCompat() throws {
         #expect(ModelsCatalog.providers.contains("agy"))
         #expect(!ModelsCatalog.providers.contains("antigravity"))
         #expect(!ModelsCatalog.providers.contains("google-antigravity"))
 
         let models = ModelsCatalog.models(for: "agy")
-        #expect(models.count >= 20)
+        #expect(models.count == 27)
 
-        let neon = try #require(ModelsCatalog.model(provider: "agy", id: "gemini-4-neon-high"))
-        #expect(neon.api == "anthropic-messages")
-        #expect(neon.provider == "agy")
-        #expect(neon.input == [.text])
-        #expect(neon.compat?.supportsServerCompaction == false)
-        #expect(neon.compat?.supportsMidConvoSystemMessages == false)
-        #expect(neon.compat?.supportsMidConvoToolChanges == false)
-        #expect(neon.compat?.supportsAdditionalTools == false)
-        #expect(neon.compat?.supportsToolSearch == false)
+        // Every bundled Gemini (3.8/4/Orchestrator) and Claude 5.5 model advertises multimodal image input;
+        // GPT-OSS remains text-only.
+        let visionModels = models.filter { !$0.id.hasPrefix("gpt-oss") }
+        let textOnlyModels = models.filter { $0.id.hasPrefix("gpt-oss") }
+        #expect(visionModels.count == 26)
+        #expect(textOnlyModels.map(\.id) == ["gpt-oss-120b-medium"])
 
-        let sonnet = try #require(ModelsCatalog.model(provider: "agy", id: "claude-sonnet-5-5-high"))
-        #expect(sonnet.input == [.text])
-        #expect(sonnet.compat?.supportsServerCompaction == false)
-        #expect(sonnet.compat?.supportsMidConvoToolChanges == false)
-        #expect(sonnet.compat?.supportsAdditionalTools == false)
-        #expect(sonnet.compat?.supportsToolSearch == false)
+        for model in visionModels {
+            #expect(model.api == "anthropic-messages")
+            #expect(model.provider == "agy")
+            #expect(model.input == [.text, .image], "Expected vision model \(model.id) to advertise [.text, .image]")
+            #expect(model.compat?.supportsServerCompaction == false)
+            #expect(model.compat?.supportsMidConvoSystemMessages == false)
+            #expect(model.compat?.supportsMidConvoToolChanges == false)
+            #expect(model.compat?.supportsAdditionalTools == false)
+            #expect(model.compat?.supportsToolSearch == false)
+            #expect(model.compat?.supportsLongCacheRetention == false)
+        }
 
-        // Fallback for future uncatalogued agy slugs preserves the same restrictions.
-        let future = AgyModels.model(id: "gemini-5-alpha", baseURL: "https://relay.example.com/v1")
-        #expect(future.id == "gemini-5-alpha")
-        #expect(future.provider == "agy")
-        #expect(future.baseURL == "https://relay.example.com")
-        #expect(future.input == [.text])
-        #expect(future.compat?.supportsServerCompaction == false)
-        #expect(future.compat?.supportsMidConvoToolChanges == false)
-        #expect(future.compat?.supportsAdditionalTools == false)
-        #expect(future.compat?.supportsToolSearch == false)
+        let gptOss = try #require(ModelsCatalog.model(provider: "agy", id: "gpt-oss-120b-medium"))
+        #expect(gptOss.input == [.text])
+        #expect(gptOss.compat?.supportsServerCompaction == false)
+        #expect(gptOss.compat?.supportsMidConvoToolChanges == false)
+        #expect(gptOss.compat?.supportsAdditionalTools == false)
+        #expect(gptOss.compat?.supportsToolSearch == false)
+
+        // Spot-check representative catalog lookups via AgyModels.model(id:baseURL:).
+        let neon = AgyModels.model(id: "gemini-4-neon-high", baseURL: "https://relay.example.com/v1")
+        #expect(neon.input == [.text, .image])
+        #expect(neon.baseURL == "https://relay.example.com")
+
+        let orchestrator = AgyModels.model(id: "gemini-pro-orchestrator-neon")
+        #expect(orchestrator.input == [.text, .image])
+
+        let flash = AgyModels.model(id: "gemini-3.8-flash-high")
+        #expect(flash.input == [.text, .image])
+
+        let opus = AgyModels.model(id: "claude-opus-5-5-high")
+        #expect(opus.input == [.text, .image])
+
+        let sonnet = AgyModels.model(id: "claude-sonnet-5-5-high")
+        #expect(sonnet.input == [.text, .image])
+
+        let gptOssBuilt = AgyModels.model(id: "gpt-oss-120b-medium", baseURL: "https://relay.example.com/v1")
+        #expect(gptOssBuilt.input == [.text])
+        #expect(gptOssBuilt.baseURL == "https://relay.example.com")
+
+        // Fallback for future uncatalogued agy slugs classifies vision vs text-only and preserves compat restrictions.
+        let futureGemini = AgyModels.model(id: "gemini-5-alpha", baseURL: "https://relay.example.com/v1")
+        #expect(futureGemini.id == "gemini-5-alpha")
+        #expect(futureGemini.provider == "agy")
+        #expect(futureGemini.baseURL == "https://relay.example.com")
+        #expect(futureGemini.input == [.text, .image])
+        #expect(futureGemini.compat?.supportsServerCompaction == false)
+        #expect(futureGemini.compat?.supportsMidConvoToolChanges == false)
+        #expect(futureGemini.compat?.supportsAdditionalTools == false)
+        #expect(futureGemini.compat?.supportsToolSearch == false)
+
+        let futureClaude = AgyModels.model(id: "claude-sonnet-6-high")
+        #expect(futureClaude.input == [.text, .image])
+
+        let futureGptOss = AgyModels.model(id: "gpt-oss-120b-high")
+        #expect(futureGptOss.input == [.text])
+
+        let prefixedGptOss = AgyModels.model(id: "agy/gpt-oss-20b-low")
+        #expect(prefixedGptOss.input == [.text])
+
+        let unknownSlug = AgyModels.model(id: "unknown-text-model")
+        #expect(unknownSlug.input == [.text])
+    }
+
+    @Test("ProviderVariants.agyAirRelay preserves base64 image blocks (PNG/JPEG/WebP/GIF) in user and tool_result turns for vision models and downgrades them for gpt-oss")
+    func agyAirRelayPreservesBase64Images() async throws {
+        let context = Context(
+            messages: [
+                .user(UserMessage(content: [
+                    .text(TextContent(text: "Compare these images")),
+                    .image(ImageContent(data: "cG5nLWRhdGE=", mimeType: "image/png")),
+                    .image(ImageContent(data: "anBnLWRhdGE=", mimeType: "image/jpg")),
+                    .image(ImageContent(data: "d2VicC1kYXRh", mimeType: "image/webp")),
+                    .image(ImageContent(data: "Z2lmLWRhdGE=", mimeType: "image/gif")),
+                ])),
+                .assistant(AssistantMessage(
+                    content: [.toolCall(ToolCall(id: "toolu_img_1", name: "read", arguments: ["path": .string("chart.png")]))],
+                    api: "anthropic-messages",
+                    provider: "agy",
+                    model: "gemini-4-neon-high"
+                )),
+                .toolResult(ToolResultMessage(
+                    toolCallId: "toolu_img_1",
+                    toolName: "read",
+                    content: [
+                        .text(TextContent(text: "Loaded screenshot")),
+                        .image(ImageContent(data: "dG9vbC1wbmc=", mimeType: "image/png")),
+                        .image(ImageContent(data: "dG9vbC13ZWJw", mimeType: "image/webp")),
+                    ]
+                )),
+            ]
+        )
+
+        // Vision-capable model preserves every base64 image block in both user and tool_result messages.
+        let visionClient = StubSSEClient(body: Self.anthropicSSE)
+        let visionProvider = ProviderVariants.agyAirRelay(
+            baseURL: URL(string: "https://relay.airbuild.example")!,
+            accessToken: "ya29.vision",
+            client: visionClient
+        )
+        let visionModel = AgyModels.model(id: "gemini-4-neon-high")
+        _ = await visionProvider.stream(model: visionModel, context: context, options: nil).result()
+
+        let visionReq = try #require(visionClient.lastRequest)
+        let visionBody = try decodeJSON(visionReq.body)
+        #expect(visionBody["model"] as? String == "agy/gemini-4-neon-high")
+
+        let messages = try #require(visionBody["messages"] as? [[String: Any]])
+        #expect(messages.count == 3)
+
+        let userBlocks = try #require(messages[0]["content"] as? [[String: Any]])
+        let userImages = userBlocks.filter { ($0["type"] as? String) == "image" }
+        #expect(userImages.count == 4)
+        let expectedUserImages: [(String, String)] = [
+            ("image/png", "cG5nLWRhdGE="),
+            ("image/jpeg", "anBnLWRhdGE="),
+            ("image/webp", "d2VicC1kYXRh"),
+            ("image/gif", "Z2lmLWRhdGE="),
+        ]
+        for (block, expected) in zip(userImages, expectedUserImages) {
+            let source = try #require(block["source"] as? [String: Any])
+            #expect(source["type"] as? String == "base64")
+            #expect(source["media_type"] as? String == expected.0)
+            #expect(source["data"] as? String == expected.1)
+        }
+
+        let toolTurnBlocks = try #require(messages[2]["content"] as? [[String: Any]])
+        let toolResultBlock = try #require(toolTurnBlocks.first)
+        #expect(toolResultBlock["type"] as? String == "tool_result")
+        #expect(toolResultBlock["tool_use_id"] as? String == "toolu_img_1")
+        let toolContent = try #require(toolResultBlock["content"] as? [[String: Any]])
+        let toolImages = toolContent.filter { ($0["type"] as? String) == "image" }
+        #expect(toolImages.count == 2)
+        let expectedToolImages: [(String, String)] = [
+            ("image/png", "dG9vbC1wbmc="),
+            ("image/webp", "dG9vbC13ZWJw"),
+        ]
+        for (block, expected) in zip(toolImages, expectedToolImages) {
+            let source = try #require(block["source"] as? [String: Any])
+            #expect(source["type"] as? String == "base64")
+            #expect(source["media_type"] as? String == expected.0)
+            #expect(source["data"] as? String == expected.1)
+        }
+
+        // Non-vision gpt-oss-120b-medium downgrades both user and tool_result images to text placeholders.
+        let textOnlyClient = StubSSEClient(body: Self.anthropicSSE)
+        let textOnlyProvider = ProviderVariants.agyAirRelay(
+            baseURL: URL(string: "https://relay.airbuild.example")!,
+            accessToken: "ya29.textonly",
+            client: textOnlyClient
+        )
+        let textOnlyModel = AgyModels.model(id: "gpt-oss-120b-medium")
+        _ = await textOnlyProvider.stream(model: textOnlyModel, context: context, options: nil).result()
+
+        let textOnlyReq = try #require(textOnlyClient.lastRequest)
+        let textOnlyBody = try decodeJSON(textOnlyReq.body)
+        #expect(textOnlyBody["model"] as? String == "agy/gpt-oss-120b-medium")
+
+        let downgradedMessages = try #require(textOnlyBody["messages"] as? [[String: Any]])
+        #expect(downgradedMessages.count == 3)
+        let downgradedUserBlocks = try #require(downgradedMessages[0]["content"] as? [[String: Any]])
+        #expect(!downgradedUserBlocks.contains { ($0["type"] as? String) == "image" })
+        #expect(downgradedUserBlocks.contains { ($0["text"] as? String) == TransformMessages.nonVisionUserImagePlaceholder })
+
+        let downgradedToolTurn = try #require(downgradedMessages[2]["content"] as? [[String: Any]])
+        let downgradedToolResult = try #require(downgradedToolTurn.first)
+        let downgradedToolContent = try #require(downgradedToolResult["content"] as? [[String: Any]])
+        #expect(!downgradedToolContent.contains { ($0["type"] as? String) == "image" })
+        #expect(downgradedToolContent.contains { ($0["text"] as? String) == TransformMessages.nonVisionToolImagePlaceholder })
     }
 
     @Test("registerStored wires agy when extras.baseUrl is configured and skips cleanly with a notice when absent")
@@ -240,11 +389,20 @@ struct AgyAirRelayTests {
         #expect(resolved.model.provider == "agy")
         #expect(resolved.model.api == "anthropic-messages")
         #expect(resolved.model.baseURL == "https://relay.airbuild.example")
-        #expect(resolved.model.input == [.text])
+        #expect(resolved.model.input == [.text, .image])
         #expect(resolved.model.compat?.supportsServerCompaction == false)
         #expect(resolved.model.compat?.supportsMidConvoToolChanges == false)
         #expect(resolved.model.compat?.supportsAdditionalTools == false)
         #expect(resolved.model.compat?.supportsToolSearch == false)
+
+        let resolvedTextOnly = try #require(try await registerStored(
+            storeId: "agy",
+            store: storeWithURL,
+            modelOverride: "gpt-oss-120b-medium",
+            primeToken: false
+        ))
+        #expect(resolvedTextOnly.model.id == "gpt-oss-120b-medium")
+        #expect(resolvedTextOnly.model.input == [.text])
 
         let auth = try #require(try await resolved.authResolver?(resolved.model, nil))
         #expect(auth.token == "ya29.live")
