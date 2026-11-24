@@ -26,7 +26,11 @@ public enum AgyOAuth {
     public static let clientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep" + ".apps.googleusercontent.com"
     public static let clientSecret = "GOCSPX-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
 
-    public static let callbackPort: UInt16 = 51121
+    /// Port `0` asks the OS for any free loopback port. Google installed-app
+    /// OAuth clients accept arbitrary `localhost` ports (RFC 8252 §7.3), which
+    /// avoids `EADDRINUSE` collisions with ephemeral outbound sockets in the
+    /// macOS dynamic range (`49152–65535`).
+    public static let callbackPort: UInt16 = 0
     public static let callbackPath = "/oauth-callback"
 
     /// All seven scopes requested by `agy`.
@@ -100,9 +104,10 @@ public enum AgyOAuth {
 extension OAuthLogin {
     /// Browser PKCE sign-in for Antigravity CLI (`agy`): opens Google OAuth2
     /// with `agy`'s client and seven scopes, receives the redirect on a local
-    /// loopback listener (`http://localhost:51121/oauth-callback`), exchanges
-    /// the authorization code for access + refresh tokens, and best-effort
-    /// records the user's email in `extras["email"]`.
+    /// loopback listener (`http://localhost:<port>/oauth-callback`, using a
+    /// dynamic free port by default), exchanges the authorization code for
+    /// access + refresh tokens, and best-effort records the user's email in
+    /// `extras["email"]`.
     public static func loginAgy(
         port: UInt16 = AgyOAuth.callbackPort,
         callbacks: Callbacks,

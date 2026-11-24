@@ -9,12 +9,15 @@ struct AgyOAuthTests {
         presenter: RecordingPresenter,
         params: [String: String],
         echoState: Bool = true,
-        made: LoopbackBox
+        made: LoopbackBox,
+        recordedPort: (@Sendable (UInt16) -> Void)? = nil
     ) -> OAuthLogin.Callbacks {
         var callbacks = quietCallbacksBase
         callbacks.browser = presenter
         callbacks.loopback = { host, port, path in
-            let loopback = ScriptedLoopback(host: host, port: port, path: path, params: params, echoState: echoState)
+            recordedPort?(port)
+            let boundPort: UInt16 = port == 0 ? 49_152 : port
+            let loopback = ScriptedLoopback(host: host, port: boundPort, path: path, params: params, echoState: echoState)
             presenter.loopback = loopback
             made.set(loopback)
             return loopback
@@ -73,27 +76,37 @@ struct AgyOAuthTests {
         #expect(scopes.count == 7)
     }
 
-    @Test("loginAgy binds localhost:51121/oauth-callback, exchanges code with PKCE verifier and saves userinfo email")
+    @Test("loginAgy requests a dynamic loopback port (0), uses the bound redirect_uri, exchanges code with PKCE verifier and saves userinfo email")
     func loginSuccessWithUserInfoEmail() async throws {
+        #expect(AgyOAuth.callbackPort == 0)
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.access","refresh_token":"1//refresh","expires_in":3600}"#),
             .response(status: 200, body: #"{"email":"dev@example.com","name":"Dev"}"#),
         ])
         let presenter = RecordingPresenter()
         let made = LoopbackBox()
+        let askedPortLock = NSLock()
+        nonisolated(unsafe) var askedPort: UInt16?
         let before = Int64(Date().timeIntervalSince1970 * 1000)
 
         let credentials = try await OAuthLogin.loginAgy(
-            callbacks: callbacks(presenter: presenter, params: ["code": "auth-code-42"], made: made),
+            callbacks: callbacks(
+                presenter: presenter,
+                params: ["code": "auth-code-42"],
+                made: made,
+                recordedPort: { port in askedPortLock.withLock { askedPort = port } }
+            ),
             client: client
         )
 
+        #expect(askedPortLock.withLock { askedPort } == 0)
         let loopback = try #require(made.value)
-        #expect(loopback.redirectURI == "http://localhost:51121/oauth-callback")
+        #expect(loopback.redirectURI == "http://localhost:49152/oauth-callback")
         #expect(loopback.listened && loopback.stopped)
 
         let shownURL = try #require(presenter.shown.first)
         let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: shownURL, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        #expect(query["redirect_uri"] == "http://localhost:49152/oauth-callback")
         #expect(query["code_challenge_method"] == "S256")
         #expect(query["access_type"] == "offline")
         #expect(query["prompt"] == "consent")
@@ -115,7 +128,7 @@ struct AgyOAuthTests {
         #expect(query["code_challenge"] == PKCE.base64URL(Data(SHA256.hash(data: Data(verifier.utf8)))))
         #expect(form["grant_type"] == "authorization_code")
         #expect(form["code"] == "auth-code-42")
-        #expect(form["redirect_uri"] == "http://localhost:51121/oauth-callback")
+        #expect(form["redirect_uri"] == "http://localhost:49152/oauth-callback")
         #expect(form["client_id"] == AgyOAuth.clientID)
         #expect(form["client_secret"] == AgyOAuth.clientSecret)
 
