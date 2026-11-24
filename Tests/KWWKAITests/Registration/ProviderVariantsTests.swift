@@ -361,7 +361,7 @@ struct ProviderVariantsTests {
     }
 
     @Test("An API-key login takes the catalog's compat and thinking levels",
-          arguments: [("anthropic-api-key", "claude-fable-5"), ("openai-api-key", "gpt-4"), ("google-api-key", "gemini-3-flash-preview")])
+          arguments: [("anthropic-api-key", "claude-fable-5"), ("openai-api-key", "gpt-4.1"), ("google-api-key", "gemini-3-flash-preview")])
     func apiKeyCatalogEntry(storeId: String, id: String) async throws {
         let store = OAuthStore()
         try await store.set(OAuthCredentials(access: "key", refresh: "", expires: Int64.max), for: storeId)
