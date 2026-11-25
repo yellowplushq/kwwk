@@ -98,10 +98,31 @@ struct ProviderFailureIntegrationTests {
             context: Context(messages: []),
             options: nil
         ).result()
+        #expect(result.errorMessage == "Anthropic stop reason: refusal")
         #expect(result.failure?.rawStopReason == "refusal")
         #expect(result.failure?.stopDetails == .object(["type": .string("test-detail")]))
         #expect(result.failure?.category == .refusal)
         #expect(result.failure?.isRetryable == false)
+    }
+
+    @Test func refusalCategorySurfacesInErrorMessage() async {
+        let client = StubSSEClient(body: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\",\"category\":\"reasoning_extraction\",\"explanation\":null}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+        let result = await AnthropicProvider(client: client).stream(
+            model: AnthropicProviderTests.sampleModel,
+            context: Context(messages: []),
+            options: nil
+        ).result()
+        #expect(result.errorMessage == "Anthropic stop reason: refusal (reasoning_extraction)")
+        #expect(result.failure?.message == "Anthropic stop reason: refusal (reasoning_extraction)")
+        #expect(result.failure?.rawStopReason == "refusal")
+        #expect(result.failure?.category == .refusal)
+        #expect(result.failure?.outcome == .contentRefused)
+        #expect(result.failure?.isRetryable == false)
+        #expect(result.failure?.stopDetails == .object([
+            "type": .string("refusal"),
+            "category": .string("reasoning_extraction"),
+            "explanation": .null,
+        ]))
     }
     @Test func responsesNestedErrorPreservesCode() async {
         let client = StubSSEClient(body: "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"overloaded_error\",\"message\":\"busy\"}}}\n\n")

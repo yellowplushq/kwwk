@@ -641,15 +641,18 @@ struct AnthropicProviderTests {
 
     // MARK: - Feature 3: empty-signature / redacted encode
 
-    @Test("empty-signature thinking degrades to a text block by default")
-    func encodesEmptySignatureAsText() async throws {
+    @Test("empty-signature thinking is dropped instead of degraded to text by default")
+    func dropsEmptySignatureByDefault() async throws {
         let client = StubSSEClient(body: Self.textSSE)
         let provider = AnthropicProvider(client: client, defaultAPIKey: "k")
         let assistant = AssistantMessage(
-            content: [.thinking(ThinkingContent(thinking: "reasoned", thinkingSignature: nil))],
+            content: [
+                .thinking(ThinkingContent(thinking: "reasoned", thinkingSignature: nil)),
+                .text(TextContent(text: "visible answer")),
+            ],
             api: "anthropic-messages", provider: "anthropic", model: "claude-test"
         )
-        _ = provider.stream(
+        let s = provider.stream(
             model: Self.sampleModel,
             context: Context(messages: [
                 .user(UserMessage(text: "hi")),
@@ -657,13 +660,13 @@ struct AnthropicProviderTests {
             ]),
             options: StreamOptions(cacheRetention: CacheRetention.none)
         )
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        _ = await s.result()
         let json = Self.decodeBody(client)
         let messages = json["messages"] as? [[String: Any]]
         let content = messages?.last?["content"] as? [[String: Any]]
         #expect(content?.count == 1)
         #expect(content?.first?["type"] as? String == "text")
-        #expect(content?.first?["text"] as? String == "reasoned")
+        #expect(content?.first?["text"] as? String == "visible answer")
     }
 
     @Test("empty-signature thinking kept as thinking when allowEmptySignature")

@@ -473,11 +473,20 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
                     // A `refusal`/`sensitive`/unknown stop reason is not a clean
                     // completion — record it so `message_stop` surfaces `.error`.
                     if mapped == .error {
-                        state.errorMessage = "Anthropic stop reason: \(reason)"
+                        let stopDetails = delta["stop_details"] ?? obj["stop_details"]
+                        let detailCategory: String? = {
+                            guard case .object(let details) = stopDetails,
+                                  case .string(let category) = details["category"] ?? .null,
+                                  !category.isEmpty else { return nil }
+                            return category
+                        }()
+                        let message = detailCategory.map { "Anthropic stop reason: \(reason) (\($0))" }
+                            ?? "Anthropic stop reason: \(reason)"
+                        state.errorMessage = message
                         state.failure = ProviderFailure(
-                            message: state.errorMessage!,
+                            message: message,
                             rawStopReason: reason,
-                            stopDetails: delta["stop_details"] ?? obj["stop_details"]
+                            stopDetails: stopDetails
                         )
                     }
                 }

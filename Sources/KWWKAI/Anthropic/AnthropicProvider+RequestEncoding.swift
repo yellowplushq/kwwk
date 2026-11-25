@@ -532,8 +532,11 @@ extension AnthropicProvider {
                             blocks.append(["type": "thinking", "thinking": th.thinking, "signature": ""])
                         } else {
                             // The Messages API rejects a thinking block without a
-                            // valid signature; degrade to plain text instead.
-                            blocks.append(["type": "text", "text": th.thinking])
+                            // valid signature, and degrading it to plain assistant
+                            // text replays reasoning summaries as utterances, which
+                            // trips Claude 5.5's `reasoning_extraction` classifier.
+                            // Drop unsigned thinking instead.
+                            break
                         }
                     } else {
                         blocks.append(["type": "thinking", "thinking": th.thinking, "signature": sig!])

@@ -183,7 +183,7 @@ struct AnthropicFallbackTests {
         )
         let result = TransformMessages.stripCrossModelThinking([.assistant(message)], model: model())
         guard case .assistant(let replay) = result.first else { Issue.record("Missing assistant"); return }
-        #expect(replay.content == [.text(TextContent(text: "reasoning"))])
+        #expect(replay.content.isEmpty)
     }
 
     @Test(arguments: supportedModels)

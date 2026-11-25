@@ -288,8 +288,8 @@ public final class BedrockProvider: APIProvider, @unchecked Sendable {
                     // Capture the reasoning signature delta so a replayed thinking
                     // block carries a valid signature — Claude-on-Bedrock rejects a
                     // signed thinking block replayed without one, and `encodeMessages`
-                    // otherwise degrades it to plain text. Mirrors pi and the
-                    // AnthropicProvider's `signature_delta` handling.
+                    // otherwise drops it. Mirrors pi and the AnthropicProvider's
+                    // `signature_delta` handling.
                     if case .string(let sig) = reasoning["signature"] ?? .null {
                         state.appendSignature(index: index, signature: sig)
                     }
@@ -569,7 +569,11 @@ public final class BedrockProvider: APIProvider, @unchecked Sendable {
                                     ],
                                 ])
                             } else if supportsThinkingSignature(model: model) {
-                                parts.append(["text": thinking])
+                                // Unsigned thinking cannot be sent to Claude-on-Bedrock
+                                // and must not be degraded to plain assistant text
+                                // (replaying reasoning as text triggers `reasoning_extraction`
+                                // refusals). Drop it instead.
+                                break
                             } else {
                                 parts.append([
                                     "reasoningContent": [

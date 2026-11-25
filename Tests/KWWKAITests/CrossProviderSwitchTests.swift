@@ -294,7 +294,7 @@ struct CrossProviderSwitchTests {
 
     // MARK: - OpenAI → Anthropic
 
-    @Test("openai → anthropic: no thinking block or signature key, tool ids matched")
+    @Test("openai → anthropic: foreign thinking dropped without signature leak, visible text and tool ids matched")
     func openAIToAnthropic() async throws {
         let client = StubSSEClient(body: Self.anthropicDone)
         let provider = AnthropicProvider(client: client, defaultAPIKey: "sk-test")
@@ -304,12 +304,13 @@ struct CrossProviderSwitchTests {
                                        toolId: "call_9f8e7d6c")
         )
 
-        // Cross-model thinking is downgraded to text: no `thinking` block, and
-        // no `signature` field anywhere (a foreign one would 400 the Messages
-        // API). Live: without normalize the encoder replays the signed block.
+        // Cross-model thinking is dropped on Claude targets (never downgraded
+        // to plain assistant text, which trips `reasoning_extraction`), and no
+        // `signature` field reaches the wire.
         #expect(!Self.anthropicAssistantBlocks(body).contains { ($0["type"] as? String) == "thinking" })
         #expect(!Self.allKeys(body).contains("signature"))
-        #expect(Self.allStrings(body).contains { $0.contains("secret reasoning text") })
+        #expect(!Self.allStrings(body).contains { $0.contains("secret reasoning text") })
+        #expect(Self.allStrings(body).contains { $0.contains("Reading now.") })
         Self.expectNoForeignSignatureLeak(body)
 
         let ids = Self.anthropicToolIds(body)
@@ -378,7 +379,7 @@ struct CrossProviderSwitchTests {
 
     // MARK: - Switch to Bedrock (normalize + Bedrock's own id pass)
 
-    @Test("switch to bedrock: no reasoningContent block, thinking preserved as text, ids linked")
+    @Test("switch to bedrock: no reasoningContent block, foreign thinking dropped on Claude, ids linked")
     func switchToBedrock() async throws {
         let client = StubSSEClient(body: Self.bedrockDone)
         let provider = BedrockProvider(
@@ -398,7 +399,8 @@ struct CrossProviderSwitchTests {
         // encode path, so without normalize the foreign signed thinking would
         // be emitted as reasoningContent.reasoningText.signature.
         #expect(!Self.allKeys(body).contains("reasoningContent"))
-        #expect(Self.allStrings(body).contains { $0.contains("secret reasoning text") })
+        #expect(!Self.allStrings(body).contains { $0.contains("secret reasoning text") })
+        #expect(Self.allStrings(body).contains { $0.contains("Reading now.") })
         Self.expectNoForeignSignatureLeak(body)
 
         let ids = Self.bedrockToolIds(body)
@@ -553,5 +555,39 @@ struct CrossProviderSwitchTests {
         let thinking = Self.anthropicAssistantBlocks(body).first { ($0["type"] as? String) == "thinking" }
         #expect(thinking != nil, "same-model thinking block must be replayed")
         #expect(thinking?["signature"] as? String == "VALID_SIG_123")
+    }
+
+    @Test("relay responseModel spelling preserves signed thinking instead of dropping or downgrading")
+    func relayResponseModelKeepsSignedThinking() async throws {
+        let model = Model(
+            id: "anthropic/claude-opus-5.5",
+            name: "Claude Opus 5.5",
+            api: "airbuild-anthropic-messages-test",
+            provider: "airbuild",
+            baseURL: "https://relay.example.com",
+            reasoning: true,
+            input: [.text],
+            contextWindow: 200_000,
+            maxTokens: 32_768
+        )
+        let messages: [Message] = [
+            .user(UserMessage(text: "think")),
+            .assistant(AssistantMessage(content: [
+                .thinking(ThinkingContent(thinking: "deliberate", thinkingSignature: "RELAY_SIG_123")),
+                .text(TextContent(text: "done")),
+            ], api: model.api, provider: model.provider, model: model.id, responseModel: "claude-opus-5-5", stopReason: .stop)),
+            .user(UserMessage(text: "continue")),
+        ]
+        let client = StubSSEClient(body: Self.anthropicDone)
+        let provider = AnthropicProvider(api: model.api, client: client, defaultAPIKey: "sk-test")
+        let body = try await Self.capture(
+            provider, client, model: model, messages: messages,
+            options: StreamOptions(reasoning: .low)
+        )
+
+        let blocks = Self.anthropicAssistantBlocks(body)
+        #expect(blocks.compactMap { $0["type"] as? String } == ["thinking", "text"])
+        #expect(blocks.first?["signature"] as? String == "RELAY_SIG_123")
+        #expect(blocks.first?["thinking"] as? String == "deliberate")
     }
 }

@@ -114,20 +114,25 @@ public enum TransformMessages {
     /// Strip thinking blocks (and empty thinking signatures) when replaying an
     /// assistant turn to a model that did not produce it.
     ///
-    /// - Same model: thinking blocks pass through untouched (signatures are
-    ///   needed for replay, even when the thinking text is empty).
+    /// - Same model (including relay vendor prefixes, dot/hyphen version
+    ///   spellings, and alias-to-snapshot resolution): thinking blocks pass
+    ///   through untouched (signatures are needed for replay, even when the
+    ///   thinking text is empty).
     /// - Cross model: redacted thinking is opaque encrypted content and is
-    ///   dropped entirely; non-empty thinking is downgraded to plain text;
-    ///   empty thinking is dropped.
+    ///   dropped entirely; empty thinking is dropped; non-empty thinking is
+    ///   dropped when targeting Claude/Anthropic (replaying thinking summaries
+    ///   as plain assistant text trips Claude 5.5's `reasoning_extraction`
+    ///   refusal classifier) and downgraded to plain text for other targets.
     public static func stripCrossModelThinking(
         _ messages: [Message],
         model: Model,
         preserveAnthropicFallback: Bool = false
     ) -> [Message] {
-        messages.map { message in
+        let dropCrossModelThinking = dropsCrossModelThinking(for: model)
+        return messages.map { message in
             guard case .assistant(var a) = message else { return message }
             let isSameModel = a.provider == model.provider && a.api == model.api
-                && (a.responseModel ?? a.model) == model.id
+                && isSameModelId(a.responseModel ?? a.model, model.id)
             let preserveFallback = preserveAnthropicFallback && a.provider == model.provider
                 && a.api == "anthropic-messages" && model.api == a.api
             if preserveFallback { return message }
@@ -140,8 +145,10 @@ public enum TransformMessages {
             for block in a.content {
                 switch block {
                 case .thinking(let th):
-                    if th.redacted == true {
-                        // Drop opaque encrypted reasoning cross-model.
+                    if th.redacted == true || dropCrossModelThinking {
+                        // Drop opaque encrypted reasoning cross-model, and drop
+                        // foreign thinking when targeting Claude so reasoning
+                        // summaries are never replayed as plain assistant text.
                         continue
                     }
                     let trimmed = th.thinking.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -167,6 +174,70 @@ public enum TransformMessages {
             a.content = newContent
             return .assistant(a)
         }
+    }
+
+    private static let claudeModelPattern = try! NSRegularExpression(
+        pattern: #"(?:^|[/.:-])claude-"#,
+        options: [.caseInsensitive]
+    )
+
+    /// Claude targets must never receive cross-model thinking downgraded to
+    /// plain assistant text; doing so mimics reasoning extraction when thinking
+    /// is enabled on later turns.
+    static func dropsCrossModelThinking(for model: Model) -> Bool {
+        if model.behaviorProvider == "anthropic" { return true }
+        if URL(string: model.baseURL)?.host?.lowercased() == "api.anthropic.com" { return true }
+        let range = NSRange(model.id.startIndex..., in: model.id)
+        return claudeModelPattern.firstMatch(in: model.id, range: range) != nil
+    }
+
+    /// Whether two model identifiers refer to the same underlying model across
+    /// relay vendor prefixes (`anthropic/claude-opus-5.5` vs `claude-opus-5-5`),
+    /// dot/hyphen version spellings (`5.5` vs `5-5`), and alias-to-snapshot
+    /// resolution (`claude-opus-5-5` vs `claude-opus-5-5-20261015`).
+    static func isSameModelId(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        let a = parseCanonicalModelId(lhs)
+        let b = parseCanonicalModelId(rhs)
+        guard !a.base.isEmpty, a.base == b.base else { return false }
+        if let va = a.vendor, let vb = b.vendor, va != vb { return false }
+        if let da = a.snapshotDate, let db = b.snapshotDate, da != db { return false }
+        return true
+    }
+
+    private static func parseCanonicalModelId(
+        _ raw: String
+    ) -> (vendor: String?, base: String, snapshotDate: String?) {
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let vendor: String?
+        var name: String
+        if let slash = lowered.lastIndex(of: "/") {
+            let prefix = String(lowered[..<slash])
+            vendor = prefix.isEmpty ? nil : prefix
+            name = String(lowered[lowered.index(after: slash)...])
+        } else {
+            vendor = nil
+            name = lowered
+        }
+        var snapshotDate: String?
+        if name.count > 9 {
+            let suffixStart = name.index(name.endIndex, offsetBy: -8)
+            let dashIndex = name.index(before: suffixStart)
+            let suffix = name[suffixStart...]
+            if name[dashIndex] == "-", suffix.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                snapshotDate = String(suffix)
+                name = String(name[..<dashIndex])
+            }
+        }
+        var chars = Array(name)
+        for i in chars.indices where chars[i] == "." {
+            if i > 0, i + 1 < chars.count,
+               chars[i - 1].isASCII, chars[i - 1].isNumber,
+               chars[i + 1].isASCII, chars[i + 1].isNumber {
+                chars[i] = "-"
+            }
+        }
+        return (vendor, String(chars), snapshotDate)
     }
 
     // MARK: - Tool-call id normalization

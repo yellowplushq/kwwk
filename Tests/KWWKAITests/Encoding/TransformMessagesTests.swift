@@ -123,6 +123,72 @@ struct TransformMessagesTests {
         #expect(tc.thoughtSignature == nil)
     }
 
+    @Test("same model matches canonical relay and snapshot responseModel ids")
+    func sameModelMatchesCanonicalRelayAndSnapshotIds() {
+        let relayModel = Model(
+            id: "anthropic/claude-opus-5.5",
+            api: "airbuild-anthropic-messages-abc",
+            provider: "airbuild",
+            input: [.text]
+        )
+        let relayTurn: Message = .assistant(AssistantMessage(
+            content: [
+                .thinking(ThinkingContent(thinking: "plan", thinkingSignature: "sig-1")),
+                .thinking(ThinkingContent(thinking: "[Reasoning redacted]", thinkingSignature: "enc-1", redacted: true)),
+                .text(TextContent(text: "done")),
+            ],
+            api: relayModel.api,
+            provider: relayModel.provider,
+            model: relayModel.id,
+            responseModel: "claude-opus-5-5"
+        ))
+        #expect(TransformMessages.stripCrossModelThinking([relayTurn], model: relayModel) == [relayTurn])
+
+        let snapshotTurn: Message = .assistant(AssistantMessage(
+            content: [
+                .thinking(ThinkingContent(thinking: "plan", thinkingSignature: "sig-2")),
+                .text(TextContent(text: "done")),
+            ],
+            api: relayModel.api,
+            provider: relayModel.provider,
+            model: relayModel.id,
+            responseModel: "claude-opus-5-5-20261015"
+        ))
+        #expect(TransformMessages.stripCrossModelThinking([snapshotTurn], model: relayModel) == [snapshotTurn])
+
+        #expect(TransformMessages.isSameModelId("claude-opus-5-5", "anthropic/claude-opus-5.5"))
+        #expect(TransformMessages.isSameModelId("claude-sonnet-5-5-20261015", "claude-sonnet-5-5"))
+        #expect(TransformMessages.isSameModelId("claude-3-5-sonnet-20241022", "anthropic/claude-3.5-sonnet"))
+        #expect(!TransformMessages.isSameModelId("claude-opus-4-8", "claude-fable-5"))
+        #expect(!TransformMessages.isSameModelId("claude-opus-5", "claude-opus-5-5"))
+        #expect(!TransformMessages.isSameModelId("claude-opus-5-5-20260901", "claude-opus-5-5-20261015"))
+        #expect(!TransformMessages.isSameModelId("openai/model-1", "anthropic/model-1"))
+    }
+
+    @Test("cross model targeting Claude drops thinking instead of downgrading to plain text")
+    func crossModelTargetingClaudeDropsThinking() {
+        let targets = [
+            Model(id: "claude-opus-5-5", api: "anthropic-messages", provider: "anthropic", input: [.text]),
+            Model(id: "anthropic/claude-opus-5.5", api: "airbuild-anthropic-messages-abc", provider: "airbuild", input: [.text]),
+            Model(id: "us.anthropic.claude-opus-5-5-v1:0", api: "bedrock-converse-stream", provider: "amazon-bedrock", input: [.text]),
+        ]
+        let msgs: [Message] = [assistant([
+            .thinking(ThinkingContent(thinking: "private reasoning", thinkingSignature: "foreign-sig")),
+            .text(TextContent(text: "answer")),
+            .toolCall(ToolCall(id: "c1", name: "f", arguments: .null, thoughtSignature: "ts")),
+        ], provider: "openai", api: "openai-responses", model: "gpt-5", stopReason: .toolUse)]
+
+        for target in targets {
+            let out = TransformMessages.stripCrossModelThinking(msgs, model: target)
+            guard case .assistant(let a) = out[0] else { Issue.record("expected assistant"); continue }
+            #expect(text(out[0]) == ["answer"])
+            #expect(a.content == [
+                .text(TextContent(text: "answer")),
+                .toolCall(ToolCall(id: "c1", name: "f", arguments: .null, thoughtSignature: nil)),
+            ])
+        }
+    }
+
     // MARK: - (c) Error-turn skip
 
     @Test("errored assistant turn is skipped")
