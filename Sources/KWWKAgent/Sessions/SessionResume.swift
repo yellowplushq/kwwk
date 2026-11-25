@@ -40,6 +40,9 @@ public struct ResolvedResume: Sendable {
     public var persistedCount: Int
     /// True when an existing session was loaded (vs. a fresh id minted).
     public var resumed: Bool
+    /// Number of corrupted JSONL entry lines repaired (salvaged or skipped)
+    /// while resuming this session. Zero on clean resumes.
+    public var recoveredCorruptLines: Int
 
     public init(
         sessionId: String,
@@ -48,7 +51,8 @@ public struct ResolvedResume: Sendable {
         model: String? = nil,
         thinkingLevel: String? = nil,
         persistedCount: Int = 0,
-        resumed: Bool = false
+        resumed: Bool = false,
+        recoveredCorruptLines: Int = 0
     ) {
         self.sessionId = sessionId
         self.messages = messages
@@ -57,6 +61,7 @@ public struct ResolvedResume: Sendable {
         self.thinkingLevel = thinkingLevel
         self.persistedCount = persistedCount
         self.resumed = resumed
+        self.recoveredCorruptLines = recoveredCorruptLines
     }
 }
 
@@ -89,10 +94,33 @@ extension SessionStore {
             return ResolvedResume(sessionId: freshId)
 
         case .latestForCwd:
-            guard let info = latestForCwd(cwd),
-                  let loaded = try? load(id: info.id, scope: scope) else {
+            guard let info = latestForCwd(cwd) else {
                 return ResolvedResume(sessionId: freshId)
             }
+            if let resolved = try? loadOrRecover(id: info.id, scope: scope) {
+                return resolved
+            }
+            return ResolvedResume(sessionId: freshId)
+
+        case .id(let id):
+            guard SessionStore.isValidSessionId(id) else {
+                throw SessionStoreError.invalidId(id)
+            }
+            do {
+                return try loadOrRecover(id: id, scope: scope)
+            } catch SessionStoreError.notFound {
+                // Unknown id — create a new session under that id so the
+                // caller's intent (a stable, named session) is honored.
+                return ResolvedResume(sessionId: id)
+            } catch {
+                return ResolvedResume(sessionId: freshId)
+            }
+        }
+    }
+
+    private func loadOrRecover(id: String, scope: LoadScope) throws -> ResolvedResume {
+        do {
+            let loaded = try load(id: id, scope: scope)
             return ResolvedResume(
                 sessionId: loaded.header.id,
                 messages: loaded.messages,
@@ -102,29 +130,18 @@ extension SessionStore {
                 persistedCount: loaded.persistedContextCount,
                 resumed: true
             )
-
-        case .id(let id):
-            guard SessionStore.isValidSessionId(id) else {
-                throw SessionStoreError.invalidId(id)
-            }
-            do {
-                let loaded = try load(id: id, scope: scope)
-                return ResolvedResume(
-                    sessionId: loaded.header.id,
-                    messages: loaded.messages,
-                    displayMessages: loaded.displayMessages,
-                    model: loaded.model,
-                    thinkingLevel: loaded.thinkingLevel,
-                    persistedCount: loaded.persistedContextCount,
-                    resumed: true
-                )
-            } catch SessionStoreError.notFound {
-                // Unknown id — create a new session under that id so the
-                // caller's intent (a stable, named session) is honored.
-                return ResolvedResume(sessionId: id)
-            } catch {
-                return ResolvedResume(sessionId: freshId)
-            }
+        } catch SessionStoreError.undecodableEntry {
+            let recovered = try loadRecoveringCorruptEntries(id: id, scope: scope)
+            return ResolvedResume(
+                sessionId: recovered.loaded.header.id,
+                messages: recovered.loaded.messages,
+                displayMessages: recovered.loaded.displayMessages,
+                model: recovered.loaded.model,
+                thinkingLevel: recovered.loaded.thinkingLevel,
+                persistedCount: recovered.loaded.persistedContextCount,
+                resumed: true,
+                recoveredCorruptLines: recovered.recoveredCorruptLines
+            )
         }
     }
 }

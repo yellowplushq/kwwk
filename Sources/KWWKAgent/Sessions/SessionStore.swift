@@ -297,10 +297,23 @@ public actor SessionStore {
         }
         var line = try Self.encoder.encode(entry)
         line.append(0x0A)
-        let handle = try FileHandle(forWritingTo: url)
+        let handle = try FileHandle(forUpdating: url)
         defer { try? handle.close() }
-        try handle.seekToEnd()
-        handle.write(line)
+        let fileSize = try handle.seekToEnd()
+        // If an earlier write was cut short mid-line (process killed or FUSE
+        // flush interrupted), the file ends without a trailing newline. Insert
+        // one first so the new entry lands on its own valid line instead of
+        // fusing onto the truncated fragment and poisoning both.
+        if fileSize > 0 {
+            let lastByte = try Self.readExact(handle: handle, offset: fileSize - 1, count: 1)
+            if lastByte.first != 0x0A {
+                var separated = Data([0x0A])
+                separated.append(line)
+                line = separated
+            }
+            _ = try handle.seekToEnd()
+        }
+        try handle.write(contentsOf: line)
     }
 
     /// Atomically rewrite every persisted transcript-bearing entry with one
@@ -576,6 +589,438 @@ public actor SessionStore {
             }
         }
         return replay.loaded
+    }
+
+    struct RecoveredLoad: Sendable {
+        let loaded: LoadedSession
+        let recoveredCorruptLines: Int
+    }
+
+    private struct RawLineRecord {
+        let data: Data
+        /// Byte offset of the first byte of `data` in the session file.
+        let offset: UInt64
+        /// Byte length of this line in the file, including its terminating
+        /// `\n` when one is present.
+        let byteLength: Int
+    }
+
+    private struct ByteRangeReplacement {
+        let offset: UInt64
+        let length: Int
+        let replacement: Data
+    }
+
+    /// Replay a session file, salvaging or skipping undecodable lines instead
+    /// of throwing away the whole transcript. When any corrupt line is found,
+    /// the file is stream-repaired atomically in place so subsequent strict
+    /// loads and restarts succeed cleanly without losing context again.
+    ///
+    /// Missing/invalid headers and unsupported schema versions still throw —
+    /// only entry-line corruption after the header is recovered.
+    func loadRecoveringCorruptEntries(
+        id: String,
+        scope: LoadScope = .full
+    ) throws -> RecoveredLoad {
+        try loadRecoveringCorruptEntries(at: try path(for: id), scope: scope)
+    }
+
+    func loadRecoveringCorruptEntries(
+        at url: URL,
+        scope: LoadScope = .full,
+        tailChunkSize: Int = defaultTailChunkSize
+    ) throws -> RecoveredLoad {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: url)
+        } catch {
+            throw SessionStoreError.notFound(url.lastPathComponent)
+        }
+
+        let fileSize: UInt64
+        do {
+            fileSize = try handle.seekToEnd()
+        } catch {
+            try? handle.close()
+            throw SessionStoreError.notFound(url.lastPathComponent)
+        }
+        guard fileSize > 0 else {
+            try? handle.close()
+            throw SessionStoreError.missingHeader(url.path)
+        }
+
+        let header: Header
+        let bodyStartOffset: UInt64
+        do {
+            let (headerData, startOffset) = try Self.readHeaderLine(
+                from: handle,
+                fileSize: fileSize,
+                path: url.path
+            )
+            guard let headerLine = String(data: headerData, encoding: .utf8) else {
+                throw SessionStoreError.invalidHeader(url.path)
+            }
+            header = try parseHeader(headerLine, path: url.path)
+            bodyStartOffset = startOffset
+        } catch {
+            try? handle.close()
+            throw error
+        }
+
+        var replay = Replay(header: header, tracksDisplay: scope == .full)
+        var replacements: [ByteRangeReplacement] = []
+        var recoveredCount = 0
+
+        if bodyStartOffset < fileSize {
+            let records: [RawLineRecord]
+            do {
+                switch scope {
+                case .context:
+                    records = try Self.collectContextLines(
+                        from: handle,
+                        bodyStartOffset: bodyStartOffset,
+                        fileSize: fileSize,
+                        tailChunkSize: tailChunkSize
+                    )
+                case .full:
+                    records = try Self.collectAllLines(
+                        from: handle,
+                        bodyStartOffset: bodyStartOffset,
+                        fileSize: fileSize,
+                        chunkSize: tailChunkSize
+                    )
+                }
+            } catch {
+                try? handle.close()
+                throw error
+            }
+
+            for record in records {
+                if let entry = try? Self.decoder.decode(Entry.self, from: record.data) {
+                    replay.apply(entry)
+                    continue
+                }
+                recoveredCount += 1
+                if let salvaged = Self.salvageTrailingEntry(from: record.data) {
+                    replay.apply(salvaged.entry)
+                    var replacement = salvaged.rawBytes
+                    replacement.append(0x0A)
+                    replacements.append(ByteRangeReplacement(
+                        offset: record.offset,
+                        length: record.byteLength,
+                        replacement: replacement
+                    ))
+                } else {
+                    replacements.append(ByteRangeReplacement(
+                        offset: record.offset,
+                        length: record.byteLength,
+                        replacement: Data()
+                    ))
+                }
+            }
+        }
+
+        try? handle.close()
+
+        if !replacements.isEmpty {
+            try? Self.streamReplaceRanges(
+                in: url,
+                directory: directory,
+                fileSize: fileSize,
+                replacements: replacements
+            )
+        }
+
+        let loaded = replay.loaded
+        latestMetaBySession[loaded.header.id] = MetaSnapshot(
+            model: loaded.model,
+            provider: loaded.provider,
+            thinkingLevel: loaded.thinkingLevel,
+            title: loaded.title
+        )
+        return RecoveredLoad(loaded: loaded, recoveredCorruptLines: recoveredCount)
+    }
+
+    /// Every top-level key a valid `Entry` JSON object can begin with
+    /// (`.message`, `.meta`, or `.compaction`, sorted or unsorted).
+    private static let fusedEntryPrefixes: [[UInt8]] = [
+        #"{"contextWindow":"#,
+        #"{"firstKeptMessageIndex":"#,
+        #"{"message":"#,
+        #"{"messagesCompacted":"#,
+        #"{"model":"#,
+        #"{"provider":"#,
+        #"{"reason":"#,
+        #"{"replacementMessages":"#,
+        #"{"thinkingLevel":"#,
+        #"{"timestamp":"#,
+        #"{"title":"#,
+        #"{"tokensBefore":"#,
+        #"{"trustedRecap":"#,
+        #"{"type":"#,
+        #"{"usage":"#,
+    ].map { Array($0.utf8) }
+
+    /// When a previous write was truncated mid-line without a trailing newline,
+    /// the next appended JSON entry can land fused onto the end of the same
+    /// line (`<truncated prefix>{"message":{...}}`). Scan for a valid entry
+    /// suffix so that valid message is not lost when discarding the prefix.
+    private static func salvageTrailingEntry(from lineData: Data) -> (entry: Entry, rawBytes: Data)? {
+        guard lineData.count > 2 else { return nil }
+        var candidateOffsets: [Int] = []
+        lineData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            let count = bytes.count
+            var i = 1
+            while i < count - 1 {
+                if bytes[i] == 0x7B && bytes[i + 1] == 0x22 { // `{"`
+                    for prefix in fusedEntryPrefixes {
+                        if i + prefix.count <= count {
+                            var matched = true
+                            for j in 2..<prefix.count {
+                                if bytes[i + j] != prefix[j] {
+                                    matched = false
+                                    break
+                                }
+                            }
+                            if matched {
+                                candidateOffsets.append(i)
+                                break
+                            }
+                        }
+                    }
+                }
+                i += 1
+            }
+        }
+        for offset in candidateOffsets {
+            let suffix = Data(lineData[offset...])
+            if let entry = try? decoder.decode(Entry.self, from: suffix) {
+                return (entry, suffix)
+            }
+        }
+        return nil
+    }
+
+    /// Scans backwards from EOF in bounded chunks until the newest valid
+    /// compaction marker (or `bodyStartOffset`), returning lines in file order
+    /// with their exact file offsets and byte lengths.
+    private static func collectContextLines(
+        from handle: FileHandle,
+        bodyStartOffset: UInt64,
+        fileSize: UInt64,
+        tailChunkSize: Int
+    ) throws -> [RawLineRecord] {
+        let chunkSize = max(1, tailChunkSize)
+        var cursor = fileSize
+        var fragmentChunks: [Data] = []
+        var fragmentHasTrailingNewline = false
+        var collectedReversed: [RawLineRecord] = []
+        var foundCompaction = false
+
+        func isCompactionMarker(_ lineData: Data) -> Bool {
+            guard contains(lineData, compactionDiscriminator) else { return false }
+            if case .compaction? = try? decoder.decode(Entry.self, from: lineData) {
+                return true
+            }
+            return false
+        }
+
+        while cursor > bodyStartOffset && !foundCompaction {
+            let step = UInt64(chunkSize)
+            let readStart = cursor > step ? max(bodyStartOffset, cursor - step) : bodyStartOffset
+            let length = Int(cursor - readStart)
+            let chunk = try readExact(handle: handle, offset: readStart, count: length)
+
+            var segmentEnd = chunk.count
+            chunk.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                var i = chunk.count - 1
+                while i >= 0 {
+                    if bytes[i] == 0x0A {
+                        let lineStart = i + 1
+                        let lineData = assembleLine(
+                            prefix: chunk,
+                            range: lineStart..<segmentEnd,
+                            trailingChunksReversed: fragmentChunks
+                        )
+                        let hasNewline = fragmentChunks.isEmpty
+                            ? (segmentEnd < chunk.count || fragmentHasTrailingNewline)
+                            : fragmentHasTrailingNewline
+                        fragmentChunks.removeAll(keepingCapacity: true)
+                        fragmentHasTrailingNewline = true
+                        segmentEnd = i
+                        if !lineData.isEmpty {
+                            let lineOffset = readStart + UInt64(lineStart)
+                            let byteLength = lineData.count + (hasNewline ? 1 : 0)
+                            collectedReversed.append(RawLineRecord(
+                                data: lineData,
+                                offset: lineOffset,
+                                byteLength: byteLength
+                            ))
+                            if isCompactionMarker(lineData) {
+                                foundCompaction = true
+                                break
+                            }
+                        }
+                    }
+                    i -= 1
+                }
+            }
+
+            if !foundCompaction {
+                if segmentEnd > 0 {
+                    fragmentChunks.append(Data(chunk[0..<segmentEnd]))
+                }
+                cursor = readStart
+            }
+        }
+
+        if !foundCompaction && !fragmentChunks.isEmpty {
+            let lineData = assembleLine(
+                prefix: nil,
+                range: 0..<0,
+                trailingChunksReversed: fragmentChunks
+            )
+            if !lineData.isEmpty {
+                let byteLength = lineData.count + (fragmentHasTrailingNewline ? 1 : 0)
+                collectedReversed.append(RawLineRecord(
+                    data: lineData,
+                    offset: bodyStartOffset,
+                    byteLength: byteLength
+                ))
+            }
+        }
+
+        return collectedReversed.reversed()
+    }
+
+    /// Scans forward from `bodyStartOffset` to `fileSize` in chunks, returning
+    /// every non-empty line with its exact file offset and byte length.
+    private static func collectAllLines(
+        from handle: FileHandle,
+        bodyStartOffset: UInt64,
+        fileSize: UInt64,
+        chunkSize: Int
+    ) throws -> [RawLineRecord] {
+        let stepSize = max(1, chunkSize)
+        var offset = bodyStartOffset
+        var currentLine = Data()
+        var currentLineStart = bodyStartOffset
+        var records: [RawLineRecord] = []
+
+        while offset < fileSize {
+            let remaining = Int(min(UInt64(stepSize), fileSize - offset))
+            let chunk = try readExact(handle: handle, offset: offset, count: remaining)
+            guard !chunk.isEmpty else { break }
+
+            var pos = 0
+            while pos < chunk.count {
+                if let nl = chunk[pos...].firstIndex(of: 0x0A) {
+                    if currentLine.isEmpty {
+                        currentLineStart = offset + UInt64(pos)
+                    }
+                    if nl > pos {
+                        currentLine.append(chunk[pos..<nl])
+                    }
+                    if !currentLine.isEmpty {
+                        records.append(RawLineRecord(
+                            data: currentLine,
+                            offset: currentLineStart,
+                            byteLength: currentLine.count + 1
+                        ))
+                        currentLine.removeAll(keepingCapacity: true)
+                    }
+                    pos = nl + 1
+                } else {
+                    if currentLine.isEmpty {
+                        currentLineStart = offset + UInt64(pos)
+                    }
+                    currentLine.append(chunk[pos..<chunk.count])
+                    pos = chunk.count
+                }
+            }
+            offset += UInt64(chunk.count)
+        }
+
+        if !currentLine.isEmpty {
+            records.append(RawLineRecord(
+                data: currentLine,
+                offset: currentLineStart,
+                byteLength: currentLine.count
+            ))
+        }
+        return records
+    }
+
+    /// Stream-copies `url` into a temporary 0600 file while applying sorted
+    /// non-overlapping byte-range replacements, then atomically renames it
+    /// into place. Uses bounded memory regardless of file size.
+    private static func streamReplaceRanges(
+        in url: URL,
+        directory: URL,
+        fileSize: UInt64,
+        replacements: [ByteRangeReplacement]
+    ) throws {
+        let sorted = replacements.sorted { $0.offset < $1.offset }
+        let reader = try FileHandle(forReadingFrom: url)
+        defer { try? reader.close() }
+
+        let temporaryURL = directory.appendingPathComponent(
+            ".\(url.lastPathComponent).\(UUID().uuidString).tmp"
+        )
+        guard FileManager.default.createFile(
+            atPath: temporaryURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw SessionStoreError.writeFailed(path: url.path)
+        }
+
+        do {
+            let writer = try FileHandle(forWritingTo: temporaryURL)
+            defer { try? writer.close() }
+
+            var cursor: UInt64 = 0
+            var lastWrittenByte: UInt8?
+
+            func copyRange(_ start: UInt64, _ end: UInt64) throws {
+                var pos = start
+                while pos < end {
+                    let count = Int(min(UInt64(defaultTailChunkSize), end - pos))
+                    let chunk = try readExact(handle: reader, offset: pos, count: count)
+                    guard !chunk.isEmpty else { break }
+                    try writer.write(contentsOf: chunk)
+                    lastWrittenByte = chunk.last
+                    pos += UInt64(chunk.count)
+                }
+            }
+
+            for item in sorted {
+                let start = max(cursor, item.offset)
+                if start > cursor {
+                    try copyRange(cursor, start)
+                }
+                if !item.replacement.isEmpty {
+                    try writer.write(contentsOf: item.replacement)
+                    lastWrittenByte = item.replacement.last
+                }
+                cursor = min(fileSize, item.offset + UInt64(item.length))
+            }
+            if cursor < fileSize {
+                try copyRange(cursor, fileSize)
+            }
+            if let last = lastWrittenByte, last != 0x0A {
+                try writer.write(contentsOf: Data([0x0A]))
+            }
+            try writer.close()
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+
+        guard rename(temporaryURL.path, url.path) == 0 else {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw SessionStoreError.writeFailed(path: url.path)
+        }
     }
 
     private static let compactionDiscriminator = Array(#""type":"compaction""#.utf8)
