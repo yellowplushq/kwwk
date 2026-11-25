@@ -124,7 +124,7 @@
     }
   },
   "github-copilot": {
-    "$note": "Copilot's own limits and list, read from GET api.githubcopilot.com/models with a signed-in account on 2026-10-13, rechecked 2026-11-10. pi-mono carries each vendor's native window (1M for most), which Copilot does not give: a session would overflow long before kwwk thought to compact. contextWindow is Copilot's max_prompt_tokens + max_output_tokens (never above its max_context_window_tokens), since kwwk budgets a prompt as the window less the output reserve. A null is a model Copilot no longer lists. claude-fable-5.2 and gemini-4-carbon (2026-11-11) and gemini-4-hydrogen (2026-11-16), and gemini-4-neon, gpt-6.2-astra and gpt-6.2-sol (2026-11-19), with no signed-in Copilot account at hand, take their siblings' limits (claude-fable-5.1, gemini-4-argon, gpt-6.1-sol) until read off Copilot's /models; mai-code-2 and mai-code-2-flash (2026-11-19), with no sibling, take the window of Copilot's other Responses-wire models (400k): a window kept too small only compacts early, one too large overflows.",
+    "$note": "Copilot's own limits and list, read from GET api.githubcopilot.com/models with a signed-in account on 2026-10-13, rechecked 2026-11-10. pi-mono carries each vendor's native window (1M for most), which Copilot does not give: a session would overflow long before kwwk thought to compact. contextWindow is Copilot's max_prompt_tokens + max_output_tokens (never above its max_context_window_tokens), since kwwk budgets a prompt as the window less the output reserve. A null is a model Copilot no longer lists. claude-fable-5.2 and gemini-4-carbon (2026-11-11) and gemini-4-hydrogen (2026-11-16), and gemini-4-neon, gpt-6.2-astra and gpt-6.2-sol (2026-11-19), with no signed-in Copilot account at hand, take their siblings' limits (claude-fable-5.1, gemini-4-argon, gpt-6.1-sol) until read off Copilot's /models; mai-code-2 and mai-code-2-flash (2026-11-19), with no sibling, take the window of Copilot's other Responses-wire models (400k): a window kept too small only compacts early, one too large overflows. claude-opus-5 and gpt-5.6-terra left pi and models.dev on 2026-11-24 (pi 45a3cb606); they are null here so their old window override does not leave a row with no id.",
     "claude-fable-5": {
       "contextWindow": 264000,
       "maxTokens": 64000
@@ -148,9 +148,7 @@
     "claude-opus-4.8": {
       "contextWindow": 264000
     },
-    "claude-opus-5": {
-      "contextWindow": 264000
-    },
+    "claude-opus-5": null,
     "claude-opus-5.5": {
       "contextWindow": 328000
     },
@@ -188,9 +186,7 @@
     "gpt-5.6-sol": {
       "contextWindow": 400000
     },
-    "gpt-5.6-terra": {
-      "contextWindow": 400000
-    },
+    "gpt-5.6-terra": null,
     "gpt-6-astra": {
       "contextWindow": 400000
     },
