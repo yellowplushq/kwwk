@@ -52,6 +52,14 @@ public enum AgyOAuth {
         return value
     }
 
+    /// The Code Assist project id cached on the login, if present.
+    public static func projectId(_ credentials: OAuthCredentials) -> String? {
+        guard case .string(let value)? = credentials.extras["projectId"], !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
     /// Build Google's authorization URL with PKCE (`S256`), offline access,
     /// consent prompt, and all seven `agy` scopes.
     public static func authorizeURL(
