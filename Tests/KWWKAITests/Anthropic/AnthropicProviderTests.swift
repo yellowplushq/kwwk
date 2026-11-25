@@ -896,4 +896,120 @@ struct AnthropicProviderTests {
         let unreported = try JSONEncoder().encode(Usage(input: 1))
         #expect(!String(decoding: unreported, as: UTF8.self).contains("speed"))
     }
+
+    @Test("invalid thinking signature 400 strips refused thinking blocks and retries once")
+    func invalidThinkingSignatureStripsAndRetries() async throws {
+        final class SequencedClient: HTTPClient, @unchecked Sendable {
+            private let lock = NSLock()
+            private var responses: [(Int, String)]
+            private(set) var requests: [Data] = []
+            init(_ responses: [(Int, String)]) { self.responses = responses }
+            func stream(
+                url: URL, method: String, headers: [String: String], body: Data?, cancellation: CancellationHandle?
+            ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+                let (status, payload): (Int, String) = lock.withLock {
+                    if let body { requests.append(body) }
+                    return responses.isEmpty ? (200, AnthropicProviderTests.textSSE) : responses.removeFirst()
+                }
+                let http = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
+                let bytes = Data(payload.utf8)
+                let stream = AsyncThrowingStream<Data, Error> { cont in
+                    cont.yield(bytes)
+                    cont.finish()
+                }
+                return (http, stream)
+            }
+        }
+
+        let errBody = #"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block"}}"#
+        let client = SequencedClient([(400, errBody), (200, Self.textSSE)])
+        let provider = AnthropicProvider(client: client, defaultAPIKey: "k")
+        let prior = AssistantMessage(
+            content: [
+                .thinking(ThinkingContent(thinking: "secret plan", thinkingSignature: "org-a-sig")),
+                .thinking(ThinkingContent(thinking: "[Reasoning redacted]", thinkingSignature: "org-a-enc", redacted: true)),
+                .text(TextContent(text: "visible reply")),
+            ],
+            api: "anthropic-messages",
+            provider: "anthropic",
+            model: "claude-test"
+        )
+        let context = Context(messages: [
+            .user(UserMessage(text: "hi")),
+            .assistant(prior),
+            .user(UserMessage(text: "continue")),
+        ])
+
+        let first = await provider.stream(model: Self.sampleModel, context: context, options: nil).result()
+        #expect(first.stopReason == .stop)
+        #expect(client.requests.count == 2)
+
+        let firstBody = try #require(try JSONSerialization.jsonObject(with: client.requests[0]) as? [String: Any])
+        let firstAsst = ((firstBody["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]]) ?? []
+        #expect(firstAsst.compactMap { $0["type"] as? String } == ["thinking", "redacted_thinking", "text"])
+
+        let retryBody = try #require(try JSONSerialization.jsonObject(with: client.requests[1]) as? [String: Any])
+        let retryAsst = ((retryBody["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]]) ?? []
+        #expect(retryAsst.compactMap { $0["type"] as? String } == ["text"])
+        #expect(retryAsst.first?["text"] as? String == "visible reply")
+
+        // Next turn remembers those refused signatures and omits them on the first attempt.
+        let second = await provider.stream(model: Self.sampleModel, context: context, options: nil).result()
+        #expect(second.stopReason == .stop)
+        #expect(client.requests.count == 3)
+        let thirdBody = try #require(try JSONSerialization.jsonObject(with: client.requests[2]) as? [String: Any])
+        let thirdAsst = ((thirdBody["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]]) ?? []
+        #expect(thirdAsst.compactMap { $0["type"] as? String } == ["text"])
+    }
+
+    @Test("compaction errors are not treated as invalid thinking signatures")
+    func compactionErrorNotTreatedAsInvalidThinkingSignature() {
+        #expect(AnthropicProvider.isInvalidThinkingSignature(
+            ProviderFailure(message: "Invalid `signature` in `thinking` block", httpStatus: 400)
+        ))
+        #expect(AnthropicProvider.isInvalidThinkingSignature(
+            ProviderFailure(message: "messages.1.content.0.thinking.signature: Field required", httpStatus: 400)
+        ))
+        #expect(!AnthropicProvider.isInvalidThinkingSignature(
+            ProviderFailure(message: "compaction_signature Invalid `signature` in `thinking` block", httpStatus: 400)
+        ))
+        #expect(!AnthropicProvider.isInvalidThinkingSignature(
+            ProviderFailure(message: "Invalid `signature` in `thinking` block", httpStatus: 500)
+        ))
+    }
+
+    @Test("content_block_start captures initial thinking text and signature")
+    func contentBlockStartCapturesInitialThinkingAndSignature() async throws {
+        let sse = """
+        event: message_start
+        data: {"type":"message_start","message":{"id":"msg_s","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":5,"output_tokens":0}}}
+
+        event: content_block_start
+        data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"initial ","signature":"sig-start-"}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thought"}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"end"}}
+
+        event: content_block_stop
+        data: {"type":"content_block_stop","index":0}
+
+        event: message_delta
+        data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = AnthropicProvider(client: client, defaultAPIKey: "k")
+        let result = await provider.stream(
+            model: Self.sampleModel,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: nil
+        ).result()
+        #expect(result.content == [.thinking(ThinkingContent(thinking: "initial thought", thinkingSignature: "sig-start-end"))])
+    }
 }

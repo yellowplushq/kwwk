@@ -323,6 +323,9 @@ public final class OpenAICompletionsProvider: APIProvider, @unchecked Sendable {
                         if let id {
                             state.updateToolCallID(rawIndex: rawIndex, id: id)
                         }
+                        if let extraContent = Self.geminiExtraContent(from: call["extra_content"]) {
+                            state.applyToolCallExtraContent(rawIndex: rawIndex, extraContent: extraContent)
+                        }
                         if let function {
                             if let name {
                                 state.updateToolCallName(rawIndex: rawIndex, name: name)
@@ -341,20 +344,62 @@ public final class OpenAICompletionsProvider: APIProvider, @unchecked Sendable {
                         }
                     }
                 }
-                // Encrypted reasoning details (OpenRouter / providers that round-trip
-                // opaque reasoning). Each `{type:"reasoning.encrypted", id, data}` is
-                // serialized verbatim and attached to the tool call with matching id.
+                // Structured reasoning details (OpenRouter / providers that round-trip
+                // opaque reasoning). Mirrors pi-mono: accumulate all valid entries
+                // (`reasoning.encrypted`, `reasoning.text` with signature, `reasoning.summary`)
+                // onto the thinking block's signature so they replay on every turn
+                // regardless of whether the turn has tool calls. Also keep attaching
+                // matching `reasoning.encrypted` entries by id to tool calls for
+                // backward compatibility.
                 if case .array(let details) = delta["reasoning_details"] ?? .null {
                     for d in details {
-                        guard case .object(let detail) = d,
-                              case .string("reasoning.encrypted") = detail["type"] ?? .null,
-                              case .string(let id) = detail["id"] ?? .null, !id.isEmpty,
-                              case .string(let data) = detail["data"] ?? .null, !data.isEmpty else { continue }
-                        if let any = anyFromJSONValue(.object(detail)),
+                        guard case .object(let detail) = d, Self.isValidReasoningDetail(detail) else { continue }
+                        let (contentIndex, firstSeen) = state.appendStreamedReasoningDetail(detail)
+                        if !emittedStart {
+                            out.push(.start(partial: state.snapshot()))
+                            emittedStart = true
+                        }
+                        if firstSeen {
+                            out.push(.thinkingStart(contentIndex: contentIndex, partial: state.snapshot()))
+                        }
+                        if case .string("reasoning.encrypted") = detail["type"] ?? .null,
+                           case .string(let id) = detail["id"] ?? .null, !id.isEmpty,
+                           case .string(let data) = detail["data"] ?? .null, !data.isEmpty,
+                           let any = anyFromJSONValue(.object(detail)),
                            let raw = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]),
                            let serialized = String(data: raw, encoding: .utf8) {
                             state.applyReasoningDetail(id: id, serialized: serialized)
                         }
+                    }
+                }
+                // LiteLLM `thinking_blocks` (direct on delta or mirrored under
+                // `provider_specific_fields.thinking_blocks`). Mirrors omp.
+                if let liteLLMBlocks = Self.liteLLMThinkingBlocks(from: delta) {
+                    for entry in liteLLMBlocks {
+                        guard case .object(let block) = entry,
+                              let result = state.appendLiteLLMThinkingBlock(block) else { continue }
+                        if !emittedStart {
+                            out.push(.start(partial: state.snapshot()))
+                            emittedStart = true
+                        }
+                        if result.firstSeen {
+                            out.push(.thinkingStart(contentIndex: result.index, partial: state.snapshot()))
+                        }
+                        if !result.delta.isEmpty {
+                            out.push(.thinkingDelta(
+                                contentIndex: result.index,
+                                delta: result.delta,
+                                partial: state.snapshot()
+                            ))
+                        }
+                    }
+                }
+                // Message-level Gemini OpenAI-compat signature (`thinking_signature` /
+                // `thought_signature`). Mirrors omp.
+                for field in ["thinking_signature", "thought_signature"] {
+                    if case .string(let sig) = delta[field] ?? .null, !sig.isEmpty {
+                        state.applyMessageThoughtSignature(field: field, signature: sig)
+                        break
                     }
                 }
             }
@@ -379,6 +424,60 @@ public final class OpenAICompletionsProvider: APIProvider, @unchecked Sendable {
         let final = state.finalize()
         out.push(.done(reason: final.stopReason, message: final))
         out.end(final)
+    }
+
+    static func isValidReasoningDetail(_ detail: [String: JSONValue]) -> Bool {
+        if let id = detail["id"], id != .null {
+            guard case .string = id else { return false }
+        }
+        if let format = detail["format"] {
+            guard case .string = format else { return false }
+        }
+        if let index = detail["index"] {
+            switch index {
+            case .int, .double: break
+            default: return false
+            }
+        }
+        guard case .string(let type) = detail["type"] else { return false }
+        switch type {
+        case "reasoning.encrypted":
+            if case .string(let data) = detail["data"], !data.isEmpty { return true }
+            return false
+        case "reasoning.text":
+            guard case .string = detail["text"] else { return false }
+            if let sig = detail["signature"], sig != .null {
+                guard case .string = sig else { return false }
+            }
+            return true
+        case "reasoning.summary":
+            if case .string = detail["summary"] { return true }
+            return false
+        default:
+            return false
+        }
+    }
+
+    private static func liteLLMThinkingBlocks(from delta: [String: JSONValue]) -> [JSONValue]? {
+        if case .array(let blocks) = delta["thinking_blocks"] ?? .null, !blocks.isEmpty {
+            return blocks
+        }
+        if case .object(let fields) = delta["provider_specific_fields"] ?? .null,
+           case .array(let blocks) = fields["thinking_blocks"] ?? .null, !blocks.isEmpty {
+            return blocks
+        }
+        return nil
+    }
+
+    private static func geminiExtraContent(from value: JSONValue?) -> [String: JSONValue]? {
+        guard case .object(let obj)? = value else { return nil }
+        for ns in ["google", "vertex"] {
+            if case .object(let inner) = obj[ns] ?? .null,
+               case .string(let sig) = inner["thought_signature"] ?? .null, !sig.isEmpty {
+                return [ns: .object(["thought_signature": .string(sig)])]
+            }
+        }
+        return nil
     }
 
     /// Post-stream validation mirroring pi's openai-completions end-of-stream

@@ -1011,6 +1011,9 @@ public final class OpenAIResponsesProvider:
                         out.end(error)
                         return OpenAIResponsesDriveResult(message: error, completed: false)
                     }
+                    if case .array(let outputItems) = response["output"] ?? .null {
+                        Self.backfillReasoningSignatures(outputItems, state: state)
+                    }
                 }
                 state.stopReason = .length
                 let incomplete = state.finalize()
@@ -1521,7 +1524,8 @@ public final class OpenAIResponsesProvider:
                 // same model/api/provider (encrypted_content is model-bound) and
                 // only when the stored signature is an actual reasoning item.
                 let sameModel = a.provider == model.provider
-                    && a.api == model.api && a.model == model.id
+                    && a.api == model.api
+                    && TransformMessages.isSameModelId(a.responseModel ?? a.model, model.id)
                 if sameModel {
                     for block in a.content {
                         guard case .thinking(let th) = block,

@@ -23,6 +23,10 @@ final class BedrockStreamState: @unchecked Sendable {
         /// Bedrock's `contentBlockIndex` → our ordinal index in `order`.
         var blockByIndex: [Int: Int] = [:]
         var order: [Int] = []
+        /// Buffered decoded bytes for `reasoningContent.redactedContent` chunks,
+        /// re-encoded to a single base64 string on read (avoids invalid padding
+        /// from concatenating per-chunk base64 strings).
+        var redactedBytesByIndex: [Int: Data] = [:]
         var endedIndices: Set<Int> = []
     }
     private let state = NIOLockedValueBox(State())
@@ -82,10 +86,27 @@ final class BedrockStreamState: @unchecked Sendable {
     }
     func appendSignature(index: Int, signature: String) {
         state.withLockedValue { state in
-            if case .thinking(var th) = state.blocks[index] {
+            if case .thinking(var th) = state.blocks[index], th.redacted != true {
                 th.thinkingSignature = (th.thinkingSignature ?? "") + signature
                 state.blocks[index] = .thinking(th)
             }
+        }
+    }
+    /// Appends a base64 `redactedContent` chunk to a thinking block. Returns
+    /// `true` on the first redacted chunk so the caller can emit the placeholder delta.
+    func appendRedactedContent(index: Int, base64Chunk: String) -> Bool {
+        guard let decoded = Data(base64Encoded: base64Chunk), !decoded.isEmpty else { return false }
+        return state.withLockedValue { state in
+            guard case .thinking(var th) = state.blocks[index] else { return false }
+            let firstRedacted = th.redacted != true
+            if firstRedacted {
+                th.redacted = true
+                th.thinkingSignature = nil
+                th.thinking += "[Reasoning redacted]"
+            }
+            state.redactedBytesByIndex[index, default: Data()].append(decoded)
+            state.blocks[index] = .thinking(th)
+            return firstRedacted
         }
     }
     func appendToolCallArgs(index: Int, chunk: String) {
@@ -156,7 +177,12 @@ final class BedrockStreamState: @unchecked Sendable {
                 content: state.order.compactMap { idx -> AssistantBlock? in
                     switch state.blocks[idx] {
                     case .text(let t): return .text(t)
-                    case .thinking(let th): return .thinking(th)
+                    case .thinking(var th):
+                        if let bytes = state.redactedBytesByIndex[idx], !bytes.isEmpty {
+                            th.redacted = true
+                            th.thinkingSignature = bytes.base64EncodedString()
+                        }
+                        return .thinking(th)
                     case .toolUse(let id, let name, let json):
                         let args: JSONValue = parseToolArgs ? parseJSONObject(json) ?? .object([:]) : .object([:])
                         return .toolCall(ToolCall(id: id, name: name, arguments: args))

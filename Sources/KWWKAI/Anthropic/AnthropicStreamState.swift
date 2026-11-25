@@ -130,8 +130,23 @@ final class AnthropicStreamState: @unchecked Sendable {
         state.withLockedValue { state in
             if !state.orderedIndices.contains(index) { state.orderedIndices.append(index) }
             switch type {
-            case "text": state.blocks[index] = .text(TextContent(text: ""))
-            case "thinking": state.blocks[index] = .thinking(ThinkingContent(thinking: ""))
+            case "text":
+                let initialText: String = {
+                    if case .string(let v) = raw["text"] ?? .null { return v } else { return "" }
+                }()
+                state.blocks[index] = .text(TextContent(text: initialText))
+            case "thinking":
+                let initialThinking: String = {
+                    if case .string(let v) = raw["thinking"] ?? .null { return v } else { return "" }
+                }()
+                let initialSignature: String? = {
+                    if case .string(let v) = raw["signature"] ?? .null, !v.isEmpty { return v }
+                    return nil
+                }()
+                state.blocks[index] = .thinking(ThinkingContent(
+                    thinking: initialThinking,
+                    thinkingSignature: initialSignature
+                ))
             case "redacted_thinking":
                 let data: String = {
                     if case .string(let v) = raw["data"] ?? .null { return v } else { return "" }

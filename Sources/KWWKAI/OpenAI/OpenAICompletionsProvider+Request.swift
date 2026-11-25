@@ -269,12 +269,17 @@ extension OpenAICompletionsProvider {
                     }
                     return nil
                 }
-                let thinkingBlocks = a.content.compactMap { block -> ThinkingContent? in
-                    if case .thinking(let t) = block, !t.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        return t
-                    }
+                let allThinkingBlocks = a.content.compactMap { block -> ThinkingContent? in
+                    if case .thinking(let t) = block { return t }
                     return nil
                 }
+                let thinkingBlocks = allThinkingBlocks.filter {
+                    $0.redacted != true && !$0.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                let signedReasoningDetails = allThinkingBlocks
+                    .compactMap { Self.parseOpenAIReasoningDetails($0.thinkingSignature) }
+                    .first
+                let liteLLMThinkingBlocks = Self.encodeLiteLLMThinkingBlocks(a.content)
                 let textBody = textBlocks.map(\.text).joined()
                 if compat.requiresThinkingAsText, !thinkingBlocks.isEmpty {
                     var parts = thinkingBlocks.map { ["type": "text", "text": $0.thinking] }
@@ -284,7 +289,8 @@ extension OpenAICompletionsProvider {
                     entry["content"] = textBody.isEmpty
                         ? (compat.requiresAssistantAfterToolResult ? "" : NSNull())
                         : textBody
-                    if let signature = thinkingBlocks.first?.thinkingSignature, !signature.isEmpty {
+                    if signedReasoningDetails == nil, liteLLMThinkingBlocks.isEmpty,
+                       let signature = thinkingBlocks.first?.thinkingSignature, !signature.isEmpty {
                         // Round-trip prior reasoning under the same field the
                         // stream decoder reads it from (`reasoning_content`).
                         // Using the signature *value* as the key produced a
@@ -292,6 +298,8 @@ extension OpenAICompletionsProvider {
                         entry["reasoning_content"] = thinkingBlocks.map(\.thinking).joined(separator: "\n")
                     }
                 }
+                var legacyReasoningDetails: [[String: Any]] = []
+                var messageThoughtSignature: (field: String, value: String)?
                 let calls = a.content.compactMap { block -> [String: Any]? in
                     guard case .toolCall(let tc) = block else { return nil }
                     let argsString: String = {
@@ -303,26 +311,32 @@ extension OpenAICompletionsProvider {
                         }
                         return "{}"
                     }()
-                    return [
+                    var encodedCall: [String: Any] = [
                         "id": tc.id,
                         "type": "function",
                         "function": ["name": tc.name, "arguments": argsString],
                     ]
+                    let stored = Self.parseStoredToolCallSignature(tc.thoughtSignature)
+                    if let extraContent = stored.extraContent {
+                        encodedCall["extra_content"] = extraContent
+                    }
+                    if let legacyDetail = stored.legacyReasoningDetail {
+                        legacyReasoningDetails.append(legacyDetail)
+                    }
+                    if messageThoughtSignature == nil, let msgSig = stored.messageSignature {
+                        messageThoughtSignature = msgSig
+                    }
+                    return encodedCall
                 }
                 if !calls.isEmpty { entry["tool_calls"] = calls }
-                if !calls.isEmpty {
-                    // Re-emit encrypted reasoning details stored on tool calls'
-                    // thoughtSignature (serialized JSON of the detail object).
-                    let details: [Any] = a.content.compactMap { block -> Any? in
-                        guard case .toolCall(let tc) = block,
-                              let sig = tc.thoughtSignature, !sig.isEmpty,
-                              let data = sig.data(using: .utf8),
-                              let obj = try? JSONSerialization.jsonObject(with: data),
-                              let dict = obj as? [String: Any],
-                              (dict["type"] as? String) == "reasoning.encrypted" else { return nil }
-                        return dict
-                    }
-                    if !details.isEmpty { entry["reasoning_details"] = details }
+                if let preservedDetails = signedReasoningDetails ?? (legacyReasoningDetails.isEmpty ? nil : legacyReasoningDetails) {
+                    entry["reasoning_details"] = preservedDetails
+                }
+                if !liteLLMThinkingBlocks.isEmpty {
+                    entry["thinking_blocks"] = liteLLMThinkingBlocks
+                }
+                if let messageThoughtSignature {
+                    entry[messageThoughtSignature.field] = messageThoughtSignature.value
                 }
                 if compat.requiresReasoningContentOnAssistantMessages, model.reasoning,
                    entry["reasoning_content"] == nil {
@@ -396,6 +410,77 @@ extension OpenAICompletionsProvider {
             out = DeepSeekToolTurnReasoning.chatMessages(out)
         }
         return out
+    }
+
+    private static func parseOpenAIReasoningDetails(_ signature: String?) -> [[String: Any]]? {
+        guard let signature, signature.first == "[",
+              let data = signature.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(JSONValue.self, from: data),
+              case .array(let items) = decoded, !items.isEmpty else { return nil }
+        var result: [[String: Any]] = []
+        for item in items {
+            guard case .object(let dict) = item,
+                  OpenAICompletionsProvider.isValidReasoningDetail(dict),
+                  let any = anyFromJSONValue(.object(dict)) as? [String: Any] else { return nil }
+            result.append(any)
+        }
+        return result
+    }
+
+    private static func encodeLiteLLMThinkingBlocks(_ content: [AssistantBlock]) -> [[String: Any]] {
+        var blocks: [[String: Any]] = []
+        for block in content {
+            guard case .thinking(let th) = block else { continue }
+            if th.redacted == true {
+                if let data = th.thinkingSignature, !data.isEmpty {
+                    blocks.append(["type": "redacted_thinking", "data": data])
+                }
+                continue
+            }
+            guard let raw = th.thinkingSignature, raw.first == "{",
+                  let data = raw.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sig = obj["litellm_thinking_signature"] as? String, !sig.isEmpty else { continue }
+            blocks.append(["type": "thinking", "thinking": th.thinking, "signature": sig])
+        }
+        return blocks
+    }
+
+    private static func parseStoredToolCallSignature(
+        _ signature: String?
+    ) -> (extraContent: [String: Any]?, legacyReasoningDetail: [String: Any]?, messageSignature: (field: String, value: String)?) {
+        guard let signature, !signature.isEmpty,
+              let data = signature.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (nil, nil, nil)
+        }
+        func extractExtraContent(_ candidate: Any?) -> [String: Any]? {
+            guard let obj = candidate as? [String: Any] else { return nil }
+            for ns in ["google", "vertex"] {
+                if let inner = obj[ns] as? [String: Any],
+                   let sig = inner["thought_signature"] as? String, !sig.isEmpty {
+                    return [ns: ["thought_signature": sig]]
+                }
+            }
+            return nil
+        }
+        func extractMessageSig(_ candidate: Any?) -> (field: String, value: String)? {
+            guard let obj = candidate as? [String: Any] else { return nil }
+            for field in ["thinking_signature", "thought_signature"] {
+                if let sig = obj[field] as? String, !sig.isEmpty { return (field, sig) }
+            }
+            return nil
+        }
+        func extractLegacyDetail(_ candidate: Any?) -> [String: Any]? {
+            guard let obj = candidate as? [String: Any],
+                  (obj["type"] as? String) == "reasoning.encrypted" else { return nil }
+            return obj
+        }
+        if dict["perCall"] != nil || dict["message"] != nil {
+            let perCall = dict["perCall"]
+            return (extractExtraContent(perCall), extractLegacyDetail(perCall), extractMessageSig(dict["message"]))
+        }
+        return (extractExtraContent(dict), extractLegacyDetail(dict), extractMessageSig(dict))
     }
 
     private static func encodeTools(_ tools: [Tool], compat: ResolvedCompletionsCompat) -> [[String: Any]] {

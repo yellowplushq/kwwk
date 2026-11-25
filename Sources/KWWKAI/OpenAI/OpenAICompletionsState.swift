@@ -31,10 +31,22 @@ final class OpenAICompletionsState: @unchecked Sendable {
         /// The content index of the call opened last.
         var lastToolCallIndex: Int?
         /// Map from a settled tool-call `id` → our content index. Used to attach
-        /// encrypted reasoning details, which arrive keyed by tool-call id.
+        /// legacy encrypted reasoning details keyed by tool-call id.
         var toolCallContentIndexById: [String: Int] = [:]
-        /// Reasoning details that arrived before the matching tool-call id settled.
+        /// Legacy reasoning details that arrived before the matching tool-call id settled.
         var pendingReasoningById: [String: String] = [:]
+        /// Structured OpenRouter `reasoning_details` accumulated across chunks
+        /// (merged for `reasoning.text` / `reasoning.summary`, discrete for
+        /// `reasoning.encrypted`). Serialized onto `thinkingBlockIndex` on read.
+        var streamedReasoningDetails: [[String: JSONValue]] = []
+        /// Active block index for LiteLLM `thinking_blocks` streaming deltas.
+        var liteLLMThinkingIndex: Int?
+        /// Accumulated raw Anthropic signatures for LiteLLM `thinking_blocks`
+        /// keyed by content block index.
+        var liteLLMSignatureByBlock: [Int: String] = [:]
+        /// Pending message-level Gemini OpenAI-compat signature (`thinking_signature`
+        /// / `thought_signature`) waiting for a tool call to attach to.
+        var pendingMessageThoughtSignature: (field: String, signature: String)?
         var endedIndices: Set<Int> = []
     }
     private let state = NIOLockedValueBox(State())
@@ -143,6 +155,10 @@ final class OpenAICompletionsState: @unchecked Sendable {
                 guard openID.isEmpty || openID == id else { return }
                 var newSig = sig
                 if let pending = state.pendingReasoningById.removeValue(forKey: id) { newSig = pending }
+                if let msgSig = state.pendingMessageThoughtSignature {
+                    state.pendingMessageThoughtSignature = nil
+                    newSig = Self.mergeGeminiThoughtSignature(existing: newSig, message: msgSig)
+                }
                 state.blocks[contentIndex] = .toolUse(id: id, name: name, json: json, thoughtSignature: newSig)
             }
             state.toolCallContentIndexById[id] = contentIndex
@@ -167,17 +183,208 @@ final class OpenAICompletionsState: @unchecked Sendable {
         }
     }
 
-    /// Attach an encrypted reasoning detail (serialized JSON) to the tool call
+    /// Attach a legacy encrypted reasoning detail (serialized JSON) to the tool call
     /// with the matching id, or stash it as pending if the id has not settled.
     func applyReasoningDetail(id: String, serialized: String) {
         state.withLockedValue { state in
             if let contentIndex = state.toolCallContentIndexById[id],
-               case .toolUse(let cid, let name, let json, _) = state.blocks[contentIndex] {
-                state.blocks[contentIndex] = .toolUse(id: cid, name: name, json: json, thoughtSignature: serialized)
+               case .toolUse(let cid, let name, let json, let existing) = state.blocks[contentIndex] {
+                let merged = Self.mergeGeminiThoughtSignature(existing: existing, perCallRaw: serialized) ?? serialized
+                state.blocks[contentIndex] = .toolUse(id: cid, name: name, json: json, thoughtSignature: merged)
             } else {
                 state.pendingReasoningById[id] = serialized
             }
         }
+    }
+
+    /// Record a streamed OpenRouter `reasoning_details` entry (`reasoning.encrypted`,
+    /// `reasoning.text`, or `reasoning.summary`), merging consecutive text/summary
+    /// deltas and ensuring a thinking block exists to hold the replay array.
+    func appendStreamedReasoningDetail(_ detail: [String: JSONValue]) -> (index: Int, firstSeen: Bool) {
+        state.withLockedValue { state in
+            let firstSeen: Bool
+            let idx: Int
+            if let existing = state.thinkingBlockIndex {
+                idx = existing
+                firstSeen = false
+            } else {
+                idx = state.order.count
+                state.thinkingBlockIndex = idx
+                state.order.append(idx)
+                state.blocks[idx] = .thinking(ThinkingContent(thinking: ""))
+                firstSeen = true
+            }
+            if let last = state.streamedReasoningDetails.last,
+               case .string(let type) = detail["type"],
+               last["type"] == .string(type) {
+                if type == "reasoning.text",
+                   case .string(let incomingText) = detail["text"],
+                   case .string(let existingText) = last["text"] {
+                    var merged = last
+                    merged["text"] = .string(existingText + incomingText)
+                    if merged["signature"] == nil || merged["signature"] == .null || merged["signature"] == .string(""),
+                       let sig = detail["signature"], sig != .null {
+                        merged["signature"] = sig
+                    }
+                    Self.fillMissingCommonReasoningFields(&merged, from: detail)
+                    state.streamedReasoningDetails[state.streamedReasoningDetails.count - 1] = merged
+                    return (idx, firstSeen)
+                }
+                if type == "reasoning.summary",
+                   case .string(let incomingSummary) = detail["summary"],
+                   case .string(let existingSummary) = last["summary"] {
+                    var merged = last
+                    merged["summary"] = .string(existingSummary + incomingSummary)
+                    Self.fillMissingCommonReasoningFields(&merged, from: detail)
+                    state.streamedReasoningDetails[state.streamedReasoningDetails.count - 1] = merged
+                    return (idx, firstSeen)
+                }
+            }
+            state.streamedReasoningDetails.append(detail)
+            return (idx, firstSeen)
+        }
+    }
+
+    private static func fillMissingCommonReasoningFields(
+        _ target: inout [String: JSONValue],
+        from source: [String: JSONValue]
+    ) {
+        if target["id"] == nil || target["id"] == .null, let id = source["id"], id != .null {
+            target["id"] = id
+        }
+        if target["format"] == nil || target["format"] == .string(""),
+           case .string(let fmt) = source["format"], !fmt.isEmpty {
+            target["format"] = .string(fmt)
+        }
+        if target["index"] == nil, let idx = source["index"] {
+            target["index"] = idx
+        }
+    }
+
+    /// Record a LiteLLM `thinking_blocks` delta entry (`thinking` or `redacted_thinking`).
+    func appendLiteLLMThinkingBlock(_ entry: [String: JSONValue]) -> (index: Int, firstSeen: Bool, delta: String)? {
+        state.withLockedValue { state in
+            guard case .string(let type) = entry["type"] else { return nil }
+            if type == "redacted_thinking" {
+                guard case .string(let data) = entry["data"], !data.isEmpty else { return nil }
+                state.liteLLMThinkingIndex = nil
+                let idx = state.order.count
+                state.order.append(idx)
+                state.blocks[idx] = .thinking(ThinkingContent(
+                    thinking: "[Reasoning redacted]",
+                    thinkingSignature: data,
+                    redacted: true
+                ))
+                return (idx, true, "")
+            }
+            guard type == "thinking" else { return nil }
+            let thinking = { () -> String in
+                if case .string(let s) = entry["thinking"] { return s }
+                return ""
+            }()
+            let signature = { () -> String in
+                if case .string(let s) = entry["signature"] { return s }
+                return ""
+            }()
+            guard !thinking.isEmpty || !signature.isEmpty else { return nil }
+
+            let idx: Int
+            let firstSeen: Bool
+            if let open = state.liteLLMThinkingIndex,
+               !( !thinking.isEmpty && !(state.liteLLMSignatureByBlock[open] ?? "").isEmpty ) {
+                idx = open
+                firstSeen = false
+            } else {
+                idx = state.order.count
+                state.order.append(idx)
+                state.blocks[idx] = .thinking(ThinkingContent(thinking: ""))
+                state.liteLLMThinkingIndex = idx
+                firstSeen = true
+            }
+            if !thinking.isEmpty, case .thinking(var th) = state.blocks[idx] {
+                th.thinking += thinking
+                state.blocks[idx] = .thinking(th)
+            }
+            if !signature.isEmpty {
+                state.liteLLMSignatureByBlock[idx] = (state.liteLLMSignatureByBlock[idx] ?? "") + signature
+            }
+            return (idx, firstSeen, thinking)
+        }
+    }
+
+    /// Attach Gemini OpenAI-compat `extra_content.google|vertex.thought_signature`
+    /// onto a tool call's `thoughtSignature`.
+    func applyToolCallExtraContent(rawIndex: Int, extraContent: [String: JSONValue]) {
+        guard let any = anyFromJSONValue(.object(extraContent)),
+              let raw = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]),
+              let serialized = String(data: raw, encoding: .utf8) else { return }
+        state.withLockedValue { state in
+            guard let contentIndex = state.toolCallIndexMap[rawIndex],
+                  case .toolUse(let id, let name, let json, let existing) = state.blocks[contentIndex] else { return }
+            let merged = Self.mergeGeminiThoughtSignature(existing: existing, perCallRaw: serialized) ?? serialized
+            state.blocks[contentIndex] = .toolUse(id: id, name: name, json: json, thoughtSignature: merged)
+        }
+    }
+
+    /// Attach a message-level Gemini OpenAI-compat signature (`thinking_signature`
+    /// / `thought_signature`) to the first tool call (or stash until one arrives).
+    func applyMessageThoughtSignature(field: String, signature: String) {
+        state.withLockedValue { state in
+            if let firstToolIndex = state.order.first(where: { idx in
+                if case .toolUse = state.blocks[idx] { return true }; return false
+            }), case .toolUse(let id, let name, let json, let existing) = state.blocks[firstToolIndex] {
+                let merged = Self.mergeGeminiThoughtSignature(
+                    existing: existing,
+                    message: (field: field, signature: signature)
+                )
+                state.blocks[firstToolIndex] = .toolUse(id: id, name: name, json: json, thoughtSignature: merged)
+            } else {
+                state.pendingMessageThoughtSignature = (field: field, signature: signature)
+            }
+        }
+    }
+
+    private static func mergeGeminiThoughtSignature(
+        existing: String?,
+        perCallRaw: String? = nil,
+        message: (field: String, signature: String)? = nil
+    ) -> String? {
+        var perCallObj: Any?
+        var messageObj: [String: String] = [:]
+        if let existing, let data = existing.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if parsed["perCall"] != nil || parsed["message"] != nil {
+                perCallObj = parsed["perCall"]
+                if let msg = parsed["message"] as? [String: String] { messageObj = msg }
+            } else if let sig = parsed["thinking_signature"] as? String, !sig.isEmpty {
+                messageObj["thinking_signature"] = sig
+            } else if let sig = parsed["thought_signature"] as? String, !sig.isEmpty {
+                messageObj["thought_signature"] = sig
+            } else {
+                perCallObj = parsed
+            }
+        }
+        if let perCallRaw, let data = perCallRaw.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) {
+            perCallObj = parsed
+        }
+        if let message {
+            messageObj[message.field] = message.signature
+        }
+        let payload: Any
+        if let perCallObj, messageObj.isEmpty {
+            payload = perCallObj
+        } else if perCallObj == nil, !messageObj.isEmpty {
+            payload = messageObj
+        } else if let perCallObj {
+            payload = ["perCall": perCallObj, "message": messageObj] as [String: Any]
+        } else {
+            return existing
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return existing
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: Stream events
@@ -262,11 +469,30 @@ final class OpenAICompletionsState: @unchecked Sendable {
     private func buildMessage(parseToolArgs: Bool) -> AssistantMessage {
         if parseToolArgs { settleEmptyToolCallIds() }
         return state.withLockedValue { state in
-            AssistantMessage(
+            let serializedReasoningDetails: String? = {
+                guard !state.streamedReasoningDetails.isEmpty,
+                      let any = anyFromJSONValue(.array(state.streamedReasoningDetails.map(JSONValue.object))),
+                      let data = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]) else {
+                    return nil
+                }
+                return String(data: data, encoding: .utf8)
+            }()
+            return AssistantMessage(
                 content: state.order.compactMap { idx -> AssistantBlock? in
                     switch state.blocks[idx] {
                     case .text(let t): return .text(t)
-                    case .thinking(let th): return .thinking(th)
+                    case .thinking(var th):
+                        if idx == state.thinkingBlockIndex, let serializedReasoningDetails {
+                            th.thinkingSignature = serializedReasoningDetails
+                        } else if let liteLLMSig = state.liteLLMSignatureByBlock[idx], !liteLLMSig.isEmpty,
+                                  let data = try? JSONSerialization.data(
+                                      withJSONObject: ["litellm_thinking_signature": liteLLMSig],
+                                      options: [.sortedKeys]
+                                  ),
+                                  let encoded = String(data: data, encoding: .utf8) {
+                            th.thinkingSignature = encoded
+                        }
+                        return .thinking(th)
                     case .toolUse(let id, let name, let json, let sig):
                         let decoded: (arguments: JSONValue, unparsed: String?) = parseToolArgs
                             ? StreamedToolArguments.decode(json)

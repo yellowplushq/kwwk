@@ -268,6 +268,33 @@ struct OpenAIResponsesTests {
         #expect(th.thinkingSignature?.contains("stale") != true)
     }
 
+    @Test("response.incomplete backfills encrypted_content from response.output")
+    func responseIncompleteBackfillsEncryptedContent() async throws {
+        let sse = """
+        data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"r_inc"}}
+
+        data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"halfway"}
+
+        data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"r_inc"}}
+
+        data: {"type":"response.incomplete","response":{"id":"resp_inc","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":5},"output":[{"type":"reasoning","id":"r_inc","encrypted_content":"enc_incomplete_payload"}]}}
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = OpenAIResponsesProvider(client: client, webSocketClient: nil, defaultAPIKey: "k")
+        let result = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "think"))]),
+            options: StreamOptions(reasoning: .high)
+        ).result()
+        #expect(result.stopReason == .length)
+        guard case .thinking(let th) = result.content.first else {
+            Issue.record("expected thinking first")
+            return
+        }
+        #expect(th.thinkingSignature?.contains("enc_incomplete_payload") == true)
+    }
+
     @Test("resolved auth can select custom API key header")
     func resolvedAuthCustomAPIKeyHeader() async throws {
         let client = StubSSEClient(body: Self.textSSE)

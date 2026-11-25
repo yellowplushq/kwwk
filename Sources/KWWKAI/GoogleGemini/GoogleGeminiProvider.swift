@@ -228,7 +228,14 @@ public final class GoogleGeminiProvider: APIProvider, @unchecked Sendable {
                         return nil
                     }()
 
-                    if case .string(let text) = p["text"] ?? .null, !text.isEmpty {
+                    let partText: String? = {
+                        if case .string(let t) = p["text"] ?? .null { return t }
+                        return nil
+                    }()
+                    let hasSignature = !(partSignature ?? "").isEmpty
+                    if p["functionCall"] == nil,
+                       let text = partText ?? (hasSignature ? "" : nil),
+                       !text.isEmpty || hasSignature {
                         if !emittedStart {
                             out.push(.start(partial: state.snapshot()))
                             emittedStart = true
@@ -238,17 +245,25 @@ public final class GoogleGeminiProvider: APIProvider, @unchecked Sendable {
                             if firstSeen {
                                 out.push(.thinkingStart(contentIndex: index, partial: state.snapshot()))
                             }
-                            state.appendThinking(index: index, text: text)
+                            if !text.isEmpty {
+                                state.appendThinking(index: index, text: text)
+                            }
                             state.setThinkingSignature(index: index, sig: partSignature)
-                            out.push(.thinkingDelta(contentIndex: index, delta: text, partial: state.snapshot()))
+                            if !text.isEmpty {
+                                out.push(.thinkingDelta(contentIndex: index, delta: text, partial: state.snapshot()))
+                            }
                         } else {
                             let (index, firstSeen) = state.noteTextBlock()
                             if firstSeen {
                                 out.push(.textStart(contentIndex: index, partial: state.snapshot()))
                             }
-                            state.appendText(index: index, text: text)
+                            if !text.isEmpty {
+                                state.appendText(index: index, text: text)
+                            }
                             state.setTextSignature(index: index, sig: partSignature)
-                            out.push(.textDelta(contentIndex: index, delta: text, partial: state.snapshot()))
+                            if !text.isEmpty {
+                                out.push(.textDelta(contentIndex: index, delta: text, partial: state.snapshot()))
+                            }
                         }
                     }
 
@@ -608,7 +623,8 @@ public final class GoogleGeminiProvider: APIProvider, @unchecked Sendable {
                 // emission on same-model AND base64 validity to mirror pi's
                 // resolveThoughtSignature.
                 let isSameModel = a.provider == model.provider
-                    && a.api == model.api && a.model == model.id
+                    && a.api == model.api
+                    && TransformMessages.isSameModelId(a.responseModel ?? a.model, model.id)
                 func resolveSig(_ sig: String?) -> String? {
                     guard isSameModel, Self.isValidThoughtSignature(sig) else { return nil }
                     return sig
@@ -618,17 +634,22 @@ public final class GoogleGeminiProvider: APIProvider, @unchecked Sendable {
                     switch block {
                     case .fallback: break
                     case .text(let t):
-                        if !t.text.isEmpty {
+                        let sig = resolveSig(t.textSignature)
+                        // Gemini can attach a thoughtSignature to a part whose
+                        // visible text is empty; dropping it breaks multi-turn
+                        // reasoning continuity (pi-mono google-shared.ts).
+                        if !t.text.isEmpty || sig != nil {
                             var part: [String: Any] = ["text": t.text]
-                            if let sig = resolveSig(t.textSignature) {
+                            if let sig {
                                 part["thoughtSignature"] = sig
                             }
                             parts.append(part)
                         }
                     case .thinking(let th):
-                        if !th.thinking.isEmpty {
+                        let sig = resolveSig(th.thinkingSignature)
+                        if !th.thinking.isEmpty || sig != nil {
                             var part: [String: Any] = ["text": th.thinking, "thought": true]
-                            if let sig = resolveSig(th.thinkingSignature) {
+                            if let sig {
                                 part["thoughtSignature"] = sig
                             }
                             parts.append(part)

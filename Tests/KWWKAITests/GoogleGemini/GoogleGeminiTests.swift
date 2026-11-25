@@ -694,4 +694,49 @@ struct GoogleGeminiTests {
         #expect(r.usage.reasoning == 15)
         #expect(r.usage.totalTokens == 135)
     }
+
+    @Test("empty-text thoughtSignature parts survive both decode and replay encode")
+    func emptyTextThoughtSignatureRoundTrip() async throws {
+        let sse = """
+        data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"","thoughtSignature":"dGhvdWdodF9zaWc="}]},"index":0}]}
+
+        data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"},{"text":"","thoughtSignature":"dGV4dF9zaWc="}]},"finishReason":"STOP","index":0}]}
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = GoogleGeminiProvider(client: client, defaultAPIKey: "k")
+        let first = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: nil
+        ).result()
+
+        #expect(first.content == [
+            .thinking(ThinkingContent(thinking: "", thinkingSignature: "dGhvdWdodF9zaWc=")),
+            .text(TextContent(text: "hello", textSignature: "dGV4dF9zaWc=")),
+        ])
+
+        let replayClient = StubSSEClient(body: Self.usageSSE)
+        let replayProvider = GoogleGeminiProvider(client: replayClient, defaultAPIKey: "k")
+        _ = await replayProvider.stream(
+            model: Self.model,
+            context: Context(messages: [
+                .user(UserMessage(text: "hi")),
+                .assistant(first),
+                .user(UserMessage(text: "next")),
+            ]),
+            options: nil
+        ).result()
+
+        let data = try #require(replayClient.lastRequest?.body)
+        let body = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let contents = try #require(body["contents"] as? [[String: Any]])
+        let modelTurn = try #require(contents.first { ($0["role"] as? String) == "model" })
+        let parts = try #require(modelTurn["parts"] as? [[String: Any]])
+        #expect(parts.count == 2)
+        #expect(parts[0]["thought"] as? Bool == true)
+        #expect(parts[0]["thoughtSignature"] as? String == "dGhvdWdodF9zaWc=")
+        #expect(parts[1]["text"] as? String == "hello")
+        #expect(parts[1]["thoughtSignature"] as? String == "dGV4dF9zaWc=")
+    }
 }

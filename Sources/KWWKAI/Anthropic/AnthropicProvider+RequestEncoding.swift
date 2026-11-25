@@ -1,7 +1,12 @@
+import Crypto
 import Foundation
 
 extension AnthropicProvider {
     // MARK: - Helpers
+
+    static func thinkingSeal(_ signature: String) -> String {
+        SHA256.hash(data: Data(signature.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 
     static func encodeBody(
         model: Model,
@@ -10,8 +15,31 @@ extension AnthropicProvider {
         systemPromptPrefix: String? = nil,
         maximumOutputTokens: Int? = nil,
         fallbackEnabled: Bool = false,
-        wireModelID: String? = nil
+        wireModelID: String? = nil,
+        refusedSignatures: Set<String> = []
     ) throws -> Data {
+        try encodeRequest(
+            model: model,
+            context: context,
+            options: options,
+            systemPromptPrefix: systemPromptPrefix,
+            maximumOutputTokens: maximumOutputTokens,
+            fallbackEnabled: fallbackEnabled,
+            wireModelID: wireModelID,
+            refusedSignatures: refusedSignatures
+        ).body
+    }
+
+    static func encodeRequest(
+        model: Model,
+        context: Context,
+        options: StreamOptions?,
+        systemPromptPrefix: String? = nil,
+        maximumOutputTokens: Int? = nil,
+        fallbackEnabled: Bool = false,
+        wireModelID: String? = nil,
+        refusedSignatures: Set<String> = []
+    ) throws -> (body: Data, sentSignatures: Set<String>) {
         var context = context
         context.messages = TransformMessages.normalize(
             context.messages,
@@ -182,6 +210,7 @@ extension AnthropicProvider {
         // pi default for `allowEmptySignature` is `false`.
         let allowEmptySig = model.compat?.allowEmptySignature == true
         var messages: [[String: Any]] = []
+        var sentSignatures = Set<String>()
         // Tool changes are held back and emitted directly before the next
         // assistant turn (or at the end): a system message between a
         // `tool_use` and its `tool_result` is rejected.
@@ -194,7 +223,13 @@ extension AnthropicProvider {
                 pendingToolChanges.append(encoded)
                 continue
             }
-            guard let encoded = Self.encodeMessage(message, allowEmptySignature: allowEmptySig, fallbackEnabled: fallbackEnabled) else { continue }
+            guard let encoded = Self.encodeMessage(
+                message,
+                allowEmptySignature: allowEmptySig,
+                fallbackEnabled: fallbackEnabled,
+                refusedSignatures: refusedSignatures,
+                sentSignatures: &sentSignatures
+            ) else { continue }
             if encoded["role"] as? String == "assistant" {
                 messages.append(contentsOf: pendingToolChanges)
                 pendingToolChanges = []
@@ -245,7 +280,7 @@ extension AnthropicProvider {
             applyCacheControl(cc, toLastBlockOf: &messages[messages.count - 1])
         }
         root["messages"] = messages
-        return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        return (try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]), sentSignatures)
     }
 
     static let continueAfterCompaction = "Continue the task from the compaction summary above."
@@ -460,7 +495,9 @@ extension AnthropicProvider {
     private static func encodeMessage(
         _ message: Message,
         allowEmptySignature: Bool,
-        fallbackEnabled: Bool
+        fallbackEnabled: Bool,
+        refusedSignatures: Set<String>,
+        sentSignatures: inout Set<String>
     ) -> [String: Any]? {
         switch message {
         case .system:
@@ -515,13 +552,20 @@ extension AnthropicProvider {
                     blocks.append(["type": "text", "text": t.text])
                 case .thinking(let th):
                     // pi parity (anthropic-messages.ts:1072-1104).
-                    if th.redacted == true {
-                        blocks.append(["type": "redacted_thinking", "data": th.thinkingSignature ?? ""])
-                        break
-                    }
                     let sig = th.thinkingSignature
                     let hasSignature = !(sig ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if hasSignature, let rawSig = sig {
+                        let seal = thinkingSeal(rawSig)
+                        if refusedSignatures.contains(seal) {
+                            break
+                        }
+                        sentSignatures.insert(seal)
+                    }
+                    if th.redacted == true {
+                        blocks.append(["type": "redacted_thinking", "data": sig ?? ""])
+                        break
+                    }
                     // A signed thinking block must be replayed even when its
                     // visible text is empty (interleaved thinking can emit
                     // signature-only blocks); dropping it invalidates the turn.

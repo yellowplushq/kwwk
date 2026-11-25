@@ -293,6 +293,11 @@ public final class BedrockProvider: APIProvider, @unchecked Sendable {
                     if case .string(let sig) = reasoning["signature"] ?? .null {
                         state.appendSignature(index: index, signature: sig)
                     }
+                    if case .string(let redacted) = reasoning["redactedContent"] ?? .null, !redacted.isEmpty {
+                        if state.appendRedactedContent(index: index, base64Chunk: redacted) {
+                            out.push(.thinkingDelta(contentIndex: index, delta: "[Reasoning redacted]", partial: state.snapshot()))
+                        }
+                    }
                 }
                 if case .object(let toolUse) = delta["toolUse"] ?? .null,
                    case .string(let input) = toolUse["input"] ?? .null {
@@ -555,32 +560,38 @@ public final class BedrockProvider: APIProvider, @unchecked Sendable {
                     case .text(let t):
                         if let text = nonBlankText(t.text) { parts.append(text) }
                     case .thinking(let th):
-                        if !th.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            let thinking = th.thinking
-                            if supportsThinkingSignature(model: model),
-                               let signature = th.thinkingSignature,
+                        if th.redacted == true {
+                            if let data = th.thinkingSignature, !data.isEmpty {
+                                parts.append(["reasoningContent": ["redactedContent": data]])
+                            }
+                            break
+                        }
+                        if supportsThinkingSignature(model: model) {
+                            if let signature = th.thinkingSignature,
                                !signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                // Keep signature-only thinking blocks even when visible
+                                // text is empty (e.g. `thinkingDisplay: "omitted"`).
                                 parts.append([
                                     "reasoningContent": [
                                         "reasoningText": [
-                                            "text": thinking,
+                                            "text": th.thinking,
                                             "signature": signature,
                                         ],
                                     ],
                                 ])
-                            } else if supportsThinkingSignature(model: model) {
+                            } else {
                                 // Unsigned thinking cannot be sent to Claude-on-Bedrock
                                 // and must not be degraded to plain assistant text
                                 // (replaying reasoning as text triggers `reasoning_extraction`
                                 // refusals). Drop it instead.
                                 break
-                            } else {
-                                parts.append([
-                                    "reasoningContent": [
-                                        "reasoningText": ["text": thinking],
-                                    ],
-                                ])
                             }
+                        } else if !th.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            parts.append([
+                                "reasoningContent": [
+                                    "reasoningText": ["text": th.thinking],
+                                ],
+                            ])
                         }
                     case .toolCall(let tc):
                         let input: Any = anyFromJSONValue(tc.arguments) ?? [String: Any]()

@@ -1,4 +1,6 @@
+import Crypto
 import Foundation
+import NIOConcurrencyHelpers
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -44,6 +46,10 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
     /// Optional route-level `ModelCompat` transform applied to request
     /// encoding, headers, and compaction capability checks.
     public let compatTransform: (@Sendable (ModelCompat?) -> ModelCompat?)?
+    /// SHA-256 hashes of thinking / redacted_thinking signatures that the
+    /// endpoint already rejected with 400 `Invalid signature in thinking block`
+    /// (e.g. after a relay rotated between upstream orgs or a prefix rewrite).
+    private let refusedSignatures = NIOLockedValueBox<Set<String>>([])
 
     public init(
         api: String = "anthropic-messages",
@@ -272,6 +278,37 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             && serverFallbackModels.contains(model.id)
     }
 
+    /// Detects 400 rejections caused by an unverifiable or missing thinking
+    /// signature (e.g. a relay switching upstream Anthropic orgs mid-session,
+    /// a proxy failing schema validation on a thinking signature, or a prefix
+    /// binding mismatch). Excludes server compaction errors. Mirrors omp's
+    /// `isInvalidThinkingSignatureError`.
+    static func isInvalidThinkingSignature(_ failure: ProviderFailure) -> Bool {
+        if let status = failure.httpStatus, status != 400 { return false }
+        let message = failure.message
+        if message.range(of: #"\bcompaction_[a-z_]+\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return false
+        }
+        return message.range(
+            of: #"invalid\s+`?signature`?\s+in\s+`?thinking`?(?:\s+block)?|thinking\.signature\b[^"\n]{0,32}\brequired\b|invalid\s+`?redacted_thinking`?|redacted_thinking.{0,60}(?:invalid|could not be)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private func currentRefusedSignatures() -> Set<String> {
+        refusedSignatures.withLockedValue { $0 }
+    }
+
+    private func rememberRefusedSignatures(_ seals: Set<String>) {
+        guard !seals.isEmpty else { return }
+        refusedSignatures.withLockedValue { existing in
+            if existing.count + seals.count > 512 {
+                existing.removeAll(keepingCapacity: true)
+            }
+            existing.formUnion(seals)
+        }
+    }
+
     private func run(
         out: AssistantMessageStream,
         model: Model,
@@ -286,87 +323,111 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         }()
 
         let fallbackEnabled = Self.usesServerSideFallback(model: effective, url: url, options: options)
-
-        let body: Data
-        do {
-            body = try Self.encodeBody(
-                model: effective,
-                context: context,
-                options: options,
-                systemPromptPrefix: systemPromptPrefix,
-                maximumOutputTokens: maximumOutputTokens,
-                fallbackEnabled: fallbackEnabled,
-                wireModelID: modelIDTransform?(effective)
-            )
-        } catch {
-            out.push(.error(reason: .error, error: AssistantMessage.makeError(
-                api: api,
-                model: model,
-                text: "Failed to encode request: \(error.displayDescription)"
-            )))
-            out.end(AssistantMessage.makeError(api: api, model: model, text: "Failed to encode request: \(error.displayDescription)"))
-            return
-        }
-
         let headers = makeHeaders(model: effective, context: context, options: options, fallbackEnabled: fallbackEnabled)
 
-        do {
-            let (response, stream) = try await client.stream(
-                url: url,
-                method: "POST",
-                headers: headers,
-                body: body,
-                cancellation: options?.cancellation
-            )
-            if response.statusCode >= 400 {
-                let failure = await ProviderFailure.http(response, body: stream)
-                let msg = AssistantMessage.makeError(api: api, model: model, text: failure.message, failure: failure)
-                out.push(.error(reason: .error, error: msg))
-                out.end(msg)
+        // Retry once after stripping thinking blocks whose signatures the
+        // endpoint rejected (e.g. relay failover to another Anthropic org).
+        for attempt in 0..<2 {
+            let encoded: (body: Data, sentSignatures: Set<String>)
+            do {
+                encoded = try Self.encodeRequest(
+                    model: effective,
+                    context: context,
+                    options: options,
+                    systemPromptPrefix: systemPromptPrefix,
+                    maximumOutputTokens: maximumOutputTokens,
+                    fallbackEnabled: fallbackEnabled,
+                    wireModelID: modelIDTransform?(effective),
+                    refusedSignatures: currentRefusedSignatures()
+                )
+            } catch {
+                let errText = "Failed to encode request: \(error.displayDescription)"
+                let errMsg = AssistantMessage.makeError(api: api, model: model, text: errText)
+                out.push(.error(reason: .error, error: errMsg))
+                out.end(errMsg)
                 return
             }
 
-            let state = AnthropicStreamState(
-                api: api,
-                provider: model.provider,
-                modelId: model.id
-            )
-            state.signal = options?.cancellation
-            state.requestModel = model
-            state.fallbackEnabled = fallbackEnabled
-            // Bridge external cancellation to the in-flight request: cancelling
-            // the drive task tears down the SSE/byte streams, which aborts the
-            // underlying URLSession task even during a silent stream gap.
-            let driveTask = Task { try await self.drive(events: parseSSE(bytes: stream), out: out, state: state) }
-            let cancelReg = options?.cancellation?.onCancel { _ in driveTask.cancel() }
-            defer { cancelReg?.cancel() }
-            try await driveTask.value
-        } catch {
-            if options?.cancellation?.isCancelled == true {
-                let aborted = AssistantMessage.makeAborted(api: api, model: model)
-                out.push(.error(reason: .aborted, error: aborted))
-                out.end(aborted)
-            } else {
-                let failure = ProviderFailure.capture(error)
-                let msg = AssistantMessage.makeError(api: api, model: model, text: failure.message, failure: failure)
-                out.push(.error(reason: .error, error: msg))
-                out.end(msg)
+            let holdSignatureRefusal = attempt == 0 && !encoded.sentSignatures.isEmpty
+
+            do {
+                let (response, stream) = try await client.stream(
+                    url: url,
+                    method: "POST",
+                    headers: headers,
+                    body: encoded.body,
+                    cancellation: options?.cancellation
+                )
+                if response.statusCode >= 400 {
+                    let failure = await ProviderFailure.http(response, body: stream)
+                    if holdSignatureRefusal, Self.isInvalidThinkingSignature(failure) {
+                        rememberRefusedSignatures(encoded.sentSignatures)
+                        continue
+                    }
+                    let msg = AssistantMessage.makeError(api: api, model: model, text: failure.message, failure: failure)
+                    out.push(.error(reason: .error, error: msg))
+                    out.end(msg)
+                    return
+                }
+
+                let state = AnthropicStreamState(
+                    api: api,
+                    provider: model.provider,
+                    modelId: model.id
+                )
+                state.signal = options?.cancellation
+                state.requestModel = model
+                state.fallbackEnabled = fallbackEnabled
+                // Bridge external cancellation to the in-flight request: cancelling
+                // the drive task tears down the SSE/byte streams, which aborts the
+                // underlying URLSession task even during a silent stream gap.
+                let driveTask = Task {
+                    try await self.drive(
+                        events: parseSSE(bytes: stream),
+                        out: out,
+                        state: state,
+                        holdSignatureRefusal: holdSignatureRefusal
+                    )
+                }
+                let cancelReg = options?.cancellation?.onCancel { _ in driveTask.cancel() }
+                defer { cancelReg?.cancel() }
+                let signaturesRefused = try await driveTask.value
+                if signaturesRefused {
+                    rememberRefusedSignatures(encoded.sentSignatures)
+                    continue
+                }
+                return
+            } catch {
+                if options?.cancellation?.isCancelled == true {
+                    let aborted = AssistantMessage.makeAborted(api: api, model: model)
+                    out.push(.error(reason: .aborted, error: aborted))
+                    out.end(aborted)
+                } else {
+                    let failure = ProviderFailure.capture(error)
+                    let msg = AssistantMessage.makeError(api: api, model: model, text: failure.message, failure: failure)
+                    out.push(.error(reason: .error, error: msg))
+                    out.end(msg)
+                }
+                return
             }
         }
     }
 
+    /// Returns `true` when a pre-output SSE `error` event refused the request's
+    /// thinking signatures and `holdSignatureRefusal` kept the error off `out`.
     private func drive(
         events: AsyncThrowingStream<SSEMessage, Error>,
         out: AssistantMessageStream,
-        state: AnthropicStreamState
-    ) async throws {
+        state: AnthropicStreamState,
+        holdSignatureRefusal: Bool
+    ) async throws -> Bool {
         var emittedStart = false
         for try await sse in events {
             if state.signal?.isCancelled == true {
                 let aborted = state.asAborted()
                 out.push(.error(reason: .aborted, error: aborted))
                 out.end(aborted)
-                return
+                return false
             }
             guard let json = parseJSONObject(sse.data) else { continue }
             guard case .object(let obj) = json,
@@ -502,7 +563,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
                     out.push(.done(reason: final.stopReason, message: final))
                 }
                 out.end(final)
-                return
+                return false
 
             case "error":
                 let text: String = {
@@ -510,11 +571,15 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
                        case .string(let m) = err["message"] ?? .null { return m }
                     return "Unknown Anthropic error"
                 }()
+                let failure = ProviderFailure.payload(.object(obj), fallback: text)
+                if holdSignatureRefusal, !emittedStart, Self.isInvalidThinkingSignature(failure) {
+                    return true
+                }
                 var err = state.asError(text: text)
-                err.failure = ProviderFailure.payload(.object(obj), fallback: text)
+                err.failure = failure
                 out.push(.error(reason: .error, error: err))
                 out.end(err)
-                return
+                return false
 
             default: break
             }
@@ -525,7 +590,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             let aborted = state.asAborted()
             out.push(.error(reason: .aborted, error: aborted))
             out.end(aborted)
-            return
+            return false
         }
         // A clean half-close mid-message is a truncated turn, not a success —
         // surface it as an error so the agent loop can retry, mirroring
@@ -533,6 +598,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         let err = state.asError(text: "Anthropic stream ended before message_stop")
         out.push(.error(reason: .error, error: err))
         out.end(err)
+        return false
     }
 }
 

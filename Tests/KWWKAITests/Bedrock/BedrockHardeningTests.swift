@@ -748,4 +748,72 @@ struct BedrockCacheAndAuthTests {
         #expect(signed.contains("SignedHeaders="))
         #expect(signed.contains("x-custom"))
     }
+
+    @Test("Bedrock redactedContent decodes across chunks and replays verbatim, and signature-only thinking survives")
+    func redactedContentAndSignatureOnlyThinkingRoundTrip() async throws {
+        let chunk1 = Data("hello ".utf8).base64EncodedString()
+        let chunk2 = Data("secret".utf8).base64EncodedString()
+        let expected = Data("hello secret".utf8).base64EncodedString()
+        let wire = Self.frames([
+            ("messageStart", #"{"role":"assistant"}"#),
+            ("contentBlockDelta", #"{"contentBlockIndex":0,"delta":{"reasoningContent":{"redactedContent":"\#(chunk1)"}}}"#),
+            ("contentBlockDelta", #"{"contentBlockIndex":0,"delta":{"reasoningContent":{"redactedContent":"\#(chunk2)"}}}"#),
+            ("contentBlockStop", #"{"contentBlockIndex":0}"#),
+            ("messageStop", #"{"stopReason":"end_turn"}"#),
+        ])
+
+        let client = ByteStubClient(body: wire)
+        let provider = BedrockProvider(
+            client: client, region: "us-east-1", environment: [:], resolveProfileFiles: false,
+            credentialsProvider: { AWSSigV4.Credentials(accessKeyId: "k", secretAccessKey: "s") }
+        )
+        let first = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: nil
+        ).result()
+        #expect(first.content == [.thinking(ThinkingContent(
+            thinking: "[Reasoning redacted]",
+            thinkingSignature: expected,
+            redacted: true
+        ))])
+
+        let sigOnly = AssistantMessage(
+            content: [
+                .thinking(ThinkingContent(thinking: "[Reasoning redacted]", thinkingSignature: expected, redacted: true)),
+                .thinking(ThinkingContent(thinking: "", thinkingSignature: "omitted-sig")),
+                .text(TextContent(text: "done")),
+            ],
+            api: Self.model.api,
+            provider: Self.model.provider,
+            model: Self.model.id
+        )
+        let replayClient = ByteStubClient(body: Self.endFrames())
+        let replayProvider = BedrockProvider(
+            client: replayClient, region: "us-east-1", environment: [:], resolveProfileFiles: false,
+            credentialsProvider: { AWSSigV4.Credentials(accessKeyId: "k", secretAccessKey: "s") }
+        )
+        _ = await replayProvider.stream(
+            model: Self.model,
+            context: Context(messages: [
+                .user(UserMessage(text: "hi")),
+                .assistant(sigOnly),
+                .user(UserMessage(text: "next")),
+            ]),
+            options: nil
+        ).result()
+
+        let data = try #require(replayClient.lastRequest?.body)
+        let body = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        let asst = try #require(messages.first { ($0["role"] as? String) == "assistant" })
+        let content = try #require(asst["content"] as? [[String: Any]])
+        #expect(content.count == 3)
+        let rc0 = try #require(content[0]["reasoningContent"] as? [String: Any])
+        #expect(rc0["redactedContent"] as? String == expected)
+        let rc1 = try #require(content[1]["reasoningContent"] as? [String: Any])
+        let rt1 = try #require(rc1["reasoningText"] as? [String: Any])
+        #expect(rt1["signature"] as? String == "omitted-sig")
+        #expect(content[2]["text"] as? String == "done")
+    }
 }

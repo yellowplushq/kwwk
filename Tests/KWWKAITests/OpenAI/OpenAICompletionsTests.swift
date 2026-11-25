@@ -1094,4 +1094,141 @@ struct OpenAICompletionsTests {
         let wide = try #require(ModelsCatalog.model(provider: "kimi-coding", id: "k3-256k"))
         #expect(wide.cost == k3.cost)
     }
+
+    @Test("OpenRouter reasoning_details round-trip on non-tool turns with text signatures and null-id encrypted blocks")
+    func openRouterReasoningDetailsRoundTripWithoutToolCalls() async throws {
+        let sse = """
+        data: {"id":"c","choices":[{"index":0,"delta":{"reasoning":"Step 1. ","reasoning_details":[{"type":"reasoning.text","text":"Step 1. ","format":"anthropic-claude-v1","index":0}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"reasoning":"Step 2.","reasoning_details":[{"type":"reasoning.text","text":"Step 2.","signature":"EqkBCkY=","format":"anthropic-claude-v1","index":0}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":null,"data":"ENC_BLOB","format":"anthropic-claude-v1","index":1}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"content":"Final answer"}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+        data: [DONE]
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = OpenAICompletionsProvider(client: client, defaultAPIKey: "sk-test")
+        let first = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "solve"))]),
+            options: nil
+        ).result()
+
+        let replayClient = StubSSEClient(body: Self.textSSE)
+        let replayProvider = OpenAICompletionsProvider(client: replayClient, defaultAPIKey: "sk-test")
+        _ = await replayProvider.stream(
+            model: Self.model,
+            context: Context(messages: [
+                .user(UserMessage(text: "solve")),
+                .assistant(first),
+                .user(UserMessage(text: "follow up")),
+            ]),
+            options: nil
+        ).result()
+
+        let json = try Self.decodeBody(replayClient)
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let asst = try #require(messages.first { ($0["role"] as? String) == "assistant" })
+        #expect(asst["reasoning_content"] == nil)
+        let rd = try #require(asst["reasoning_details"] as? [[String: Any]])
+        #expect(rd.count == 2)
+        #expect(rd[0]["type"] as? String == "reasoning.text")
+        #expect(rd[0]["text"] as? String == "Step 1. Step 2.")
+        #expect(rd[0]["signature"] as? String == "EqkBCkY=")
+        #expect(rd[1]["type"] as? String == "reasoning.encrypted")
+        #expect(rd[1]["data"] as? String == "ENC_BLOB")
+    }
+
+    @Test("LiteLLM thinking_blocks and redacted_thinking round-trip on chat completions")
+    func liteLLMThinkingBlocksRoundTrip() async throws {
+        let sse = """
+        data: {"id":"c","choices":[{"index":0,"delta":{"thinking_blocks":[{"type":"thinking","thinking":"part 1 "}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"provider_specific_fields":{"thinking_blocks":[{"type":"thinking","thinking":"part 2","signature":"sig-litellm"}]}}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"thinking_blocks":[{"type":"redacted_thinking","data":"REDACT_DATA"}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{"content":"Answer"}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+        data: [DONE]
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = OpenAICompletionsProvider(client: client, defaultAPIKey: "sk-test")
+        let first = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: nil
+        ).result()
+
+        let replayClient = StubSSEClient(body: Self.textSSE)
+        let replayProvider = OpenAICompletionsProvider(client: replayClient, defaultAPIKey: "sk-test")
+        _ = await replayProvider.stream(
+            model: Self.model,
+            context: Context(messages: [
+                .user(UserMessage(text: "hi")),
+                .assistant(first),
+                .user(UserMessage(text: "next")),
+            ]),
+            options: nil
+        ).result()
+
+        let json = try Self.decodeBody(replayClient)
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let asst = try #require(messages.first { ($0["role"] as? String) == "assistant" })
+        let blocks = try #require(asst["thinking_blocks"] as? [[String: Any]])
+        #expect(blocks.count == 2)
+        #expect(blocks[0]["type"] as? String == "thinking")
+        #expect(blocks[0]["thinking"] as? String == "part 1 part 2")
+        #expect(blocks[0]["signature"] as? String == "sig-litellm")
+        #expect(blocks[1]["type"] as? String == "redacted_thinking")
+        #expect(blocks[1]["data"] as? String == "REDACT_DATA")
+    }
+
+    @Test("Gemini OpenAI-compat extra_content and message thinking_signature round-trip")
+    func geminiOpenAICompatExtraContentRoundTrip() async throws {
+        let sse = """
+        data: {"id":"c","choices":[{"index":0,"delta":{"thinking_signature":"msg-sig-1","tool_calls":[{"index":0,"id":"call_g","type":"function","function":{"name":"read","arguments":"{}"},"extra_content":{"google":{"thought_signature":"call-sig-1"}}}]}}]}
+
+        data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+        data: [DONE]
+
+        """
+        let client = StubSSEClient(body: sse)
+        let provider = OpenAICompletionsProvider(client: client, defaultAPIKey: "sk-test")
+        let first = await provider.stream(
+            model: Self.model,
+            context: Context(messages: [.user(UserMessage(text: "read"))]),
+            options: nil
+        ).result()
+
+        let replayClient = StubSSEClient(body: Self.textSSE)
+        let replayProvider = OpenAICompletionsProvider(client: replayClient, defaultAPIKey: "sk-test")
+        _ = await replayProvider.stream(
+            model: Self.model,
+            context: Context(messages: [
+                .user(UserMessage(text: "read")),
+                .assistant(first),
+                .toolResult(ToolResultMessage(toolCallId: "call_g", toolName: "read", content: [.text(TextContent(text: "ok"))])),
+            ]),
+            options: nil
+        ).result()
+
+        let json = try Self.decodeBody(replayClient)
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        let asst = try #require(messages.first { ($0["role"] as? String) == "assistant" })
+        #expect(asst["thinking_signature"] as? String == "msg-sig-1")
+        let calls = try #require(asst["tool_calls"] as? [[String: Any]])
+        let extra = try #require(calls.first?["extra_content"] as? [String: Any])
+        let google = try #require(extra["google"] as? [String: Any])
+        #expect(google["thought_signature"] as? String == "call-sig-1")
+    }
 }
