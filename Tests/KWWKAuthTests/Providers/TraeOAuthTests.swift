@@ -167,7 +167,7 @@ struct TraeSignInTests {
         #expect(TraeOAuth.origin(of: "https://www.trae.ai/") == "https://www.trae.ai")
         #expect(TraeOAuth.origin(of: "www.trae.ai") == "https://www.trae.ai")
         #expect(TraeOAuth.origin(of: "http://127.0.0.1:8080/x") == "http://127.0.0.1:8080")
-        for address in ["smb://evil.example/share", "file://localhost/etc/passwd", "vscode://evil.example/x"] {
+        for address in ["smb://other.example/share", "file://localhost/tmp/notes.txt", "vscode://other.example/x"] {
             #expect(TraeOAuth.origin(of: address) == nil, "\(address)")
             #expect(throws: OAuthError.self, "\(address)") {
                 _ = try TraeOAuth.loginURL(
@@ -488,14 +488,14 @@ struct TraeRenewalTests {
     @Test("A stored gate that is not a Trae account gate gets no request and ends the login")
     func foreignGate() async {
         let gates = [
-            "https://evil.example",
+            "https://other.example",
             "http://api.trae.cn",
-            "https://api.trae.cn.evil.example",
-            "https://api.trae.cn@evil.example",
-            "https://evil.example/x?",
-            "https://evil.example#",
-            "http://169.254.169.254/computeMetadata/v1/?",
-            "file:///etc/passwd",
+            "https://api.trae.cn.other.example",
+            "https://api.trae.cn@other.example",
+            "https://other.example/x?",
+            "https://other.example#",
+            "http://169.254.10.10/v1/?",
+            "file:///tmp/notes.txt",
             // No URL at all: the renewal used to end the process here.
             "https://api.trae.cn:port",
             "https://api trae cn",

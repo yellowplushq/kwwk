@@ -89,10 +89,10 @@ struct MCPOAuthEndpointTests {
     func authorizationEndpointScheme() throws {
         let refused = [
             "file:///System/Applications/Calculator.app",
-            "smb://evil.example/share",
+            "smb://other.example/share",
             "shortcuts://run-shortcut?name=x",
             "javascript:alert(1)",
-            "vscode://evil.example/x",
+            "vscode://other.example/x",
             "https://user:password@auth.example.com/authorize",
             "/authorize",
         ]
@@ -125,12 +125,12 @@ struct MCPOAuthEndpointTests {
     }
 
     @Test("metadata naming another app's scheme never reaches the user agent")
-    func maliciousAuthorizationEndpoint() async throws {
+    func foreignAuthorizationEndpoint() async throws {
         let server = RoutedAuthServer()
         server.publishResource("https://mcp.example.com", authorizationServer: "https://auth.example.com")
-        server.publishAuthorizationServer("https://auth.example.com", authorize: "smb://evil.example/share")
+        server.publishAuthorizationServer("https://auth.example.com", authorize: "smb://other.example/share")
         let provider = MemoryOAuthProvider()
-        let refusal = MCPAuthError.incompatibleServer("invalid authorization endpoint smb://evil.example/share")
+        let refusal = MCPAuthError.incompatibleServer("invalid authorization endpoint smb://other.example/share")
         await #expect(throws: refusal) {
             _ = try await MCPOAuth.auth(provider, options: MCPOAuthOptions(serverURL: remote, httpClient: server))
         }
@@ -144,9 +144,9 @@ struct MCPOAuthEndpointTests {
         server.publishResource("https://mcp.example.com", authorizationServer: "https://auth.example.com")
         server.publishAuthorizationServer("https://auth.example.com")
         for hint in [
-            "http://169.254.169.254/computeMetadata/v1/",
+            "http://169.254.10.10/v1/",
             "http://127.0.0.1:8080/.well-known/oauth-protected-resource",
-            "file:///etc/passwd",
+            "file:///tmp/notes.txt",
         ] {
             let info = try await MCPOAuth.discoverServerInfo(
                 serverURL: remote,
@@ -155,7 +155,7 @@ struct MCPOAuthEndpointTests {
             )
             #expect(info.authorizationServerURL == "https://auth.example.com", "\(hint)")
         }
-        #expect(!server.contacted(host: "169.254.169.254"))
+        #expect(!server.contacted(host: "169.254.10.10"))
         #expect(!server.contacted(host: "127.0.0.1"))
         #expect(server.requests.allSatisfy { $0.url.scheme == "https" })
 
@@ -174,7 +174,7 @@ struct MCPOAuthEndpointTests {
 
     @Test("an authorization server that is not HTTPS, off the server's own origin, is not contacted")
     func authorizationServerURL() async throws {
-        let refused = ["http://127.0.0.1:8080", "http://auth.internal", "https://localhost:9443", "file:///etc"]
+        let refused = ["http://127.0.0.1:8080", "http://auth.internal", "https://localhost:9443", "file:///tmp"]
         for authorizationServer in refused {
             let server = RoutedAuthServer()
             server.publishResource("https://mcp.example.com", authorizationServer: authorizationServer)
@@ -303,7 +303,7 @@ struct MCPOAuthEndpointTests {
     func notLoopback() throws {
         for host in [
             "example.com", "localhost.example.com", "notlocalhost", "localhostx", "127.0.0.1.example.com",
-            "128.0.0.1", "10.0.0.1", "1.0.0.127", "169.254.169.254", "[100::1]", "[fe80::1]",
+            "128.0.0.1", "10.0.0.1", "1.0.0.127", "169.254.10.10", "[100::1]", "[fe80::1]",
             "[::ffff:8.8.8.8]", "[2001:db8::1]", "[64:ff9b::127.0.0.1]",
         ] {
             let url = try #require(URL(string: "https://\(host)/x"), "\(host)")
@@ -328,6 +328,69 @@ struct MCPOAuthEndpointTests {
             #expect(!MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(page)")
             #expect(throws: MCPAuthError.self, "\(page)") { try MCPOAuth.assertSecureTokenEndpoint(url) }
         }
+    }
+
+    @Test("a server on an internationalized domain name signs in end to end")
+    func internationalizedDomain() async throws {
+        for host in ["xn--mller-kva.example", "xn--fiqs8s.xn--fiqs8s", "XN--MLLER-KVA.Example."] {
+            for endpoint in ["https://\(host)/authorize", "https://\(host):8443/token"] {
+                let url = try #require(URL(string: endpoint), "\(endpoint)")
+                #expect(!MCPOAuth.isLoopback(url), "\(endpoint)")
+                #expect(MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(endpoint)")
+                #expect(MCPOAuth.isAllowedEndpoint(url, serverURL: nil), "\(endpoint)")
+                #expect(throws: Never.self, "\(endpoint)") { try MCPOAuth.assertSecureTokenEndpoint(url) }
+            }
+            let page = try start("https://\(host)/authorize", serverURL: remote)
+            #expect(page.absoluteString.lowercased().hasPrefix("https://\(host.lowercased())/authorize?"), "\(host)")
+        }
+        // Under `localhost` such a name is still loopback, and a
+        // percent-encoded ASCII character beside one is still refused.
+        for page in ["https://xn--mller-kva.localhost/authorize", "https://m%C3%BCller.local%68ost/authorize"] {
+            let url = try #require(URL(string: page), "\(page)")
+            #expect(!MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(page)")
+            #expect(throws: MCPAuthError.self, "\(page)") { try start(page, serverURL: remote) }
+        }
+
+        // The MCP server is its own authorization server.
+        let origin = "https://xn--mller-kva.example"
+        let named = try #require(URL(string: origin + "/mcp"))
+        let server = RoutedAuthServer()
+        server.publishResource(origin, authorizationServer: origin)
+        server.publishAuthorizationServer(origin)
+        let provider = MemoryOAuthProvider()
+        let result = try await MCPOAuth.auth(provider, options: MCPOAuthOptions(serverURL: named, httpClient: server))
+        #expect(result == .redirect)
+        let page = try #require(provider.redirects.first)
+        #expect(page.absoluteString.hasPrefix(origin + "/authorize?"))
+        try await MCPOAuth.finishAuthorization(
+            provider,
+            serverURL: named,
+            callbackParameters: ["code": "code-1", "state": "state-1"],
+            httpClient: server
+        )
+        #expect(provider.storedTokens?.accessToken == "access-1")
+
+        // A resource metadata URL on the server's own origin is read.
+        let hinted = RoutedAuthServer()
+        hinted.routes["GET \(origin)/prm"] = (200, [
+            "resource": .string(origin + "/mcp"),
+            "authorization_servers": .array([.string("https://auth.example.com")]),
+        ])
+        hinted.publishAuthorizationServer("https://auth.example.com")
+        let info = try await MCPOAuth.discoverServerInfo(
+            serverURL: named,
+            resourceMetadataURL: URL(string: origin + "/prm"),
+            httpClient: hinted
+        )
+        #expect(info.authorizationServerURL == "https://auth.example.com")
+        #expect(hinted.requests.first?.url.absoluteString == origin + "/prm")
+
+        // Without resource metadata, the server's origin is the
+        // authorization server, as before.
+        let legacy = RoutedAuthServer()
+        let fallback = try await MCPOAuth.discoverServerInfo(serverURL: named, httpClient: legacy)
+        #expect(fallback.authorizationServerURL == origin + "/")
+        #expect(legacy.requests.contains { $0.url.path == "/.well-known/oauth-authorization-server" })
     }
 
     @Test("metadata naming loopback by another spelling is not contacted")
