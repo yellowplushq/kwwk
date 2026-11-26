@@ -17,10 +17,10 @@ struct RedirectPolicyTests {
         #expect(!follows("https://mcp.example.com/mcp", "http://mcp.example.com/mcp"))
         #expect(!follows("https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"))
         #expect(!follows("http://mcp.example.com:8080/mcp", "https://mcp.example.com/mcp"))
-        #expect(!follows("https://mcp.example.com/mcp", "http://169.254.169.254/latest"))
+        #expect(!follows("https://mcp.example.com/mcp", "http://169.254.10.10/latest"))
         #expect(!follows("http://127.0.0.1:8080/a", "http://127.0.0.1:9090/b"))
         #expect(!follows("https://mcp.example.com/mcp", "https://user:pw@mcp.example.com/mcp"))
-        #expect(!follows("https://mcp.example.com/mcp", "file:///etc/passwd"))
+        #expect(!follows("https://mcp.example.com/mcp", "file:///tmp/notes.txt"))
         #expect(!follows("https:///a", "https:///b"))
     }
 

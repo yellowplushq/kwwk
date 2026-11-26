@@ -44,17 +44,43 @@ extension MCPOAuth {
     }
 
     /// `url`'s host as the resolver reads it: lowercased, without IPv6
-    /// brackets or trailing dots. Nil when there is none, or when it is
-    /// written with `%` (percent-encoding, an IPv6 zone): no endpoint needs
-    /// one, and the connection could read it differently than this check.
+    /// brackets or trailing dots, an internationalized name in its ASCII
+    /// (`xn--`) form. Nil when there is none, or when it is written with `%`
+    /// (percent-encoding, an IPv6 zone): no endpoint needs one, and the
+    /// connection could read it differently than this check.
     static func normalizedHost(of url: URL) -> String? {
-        guard let written = URLComponents(url: url.absoluteURL, resolvingAgainstBaseURL: false)?.percentEncodedHost,
-              !written.contains("%")
+        guard let components = URLComponents(url: url.absoluteURL, resolvingAgainstBaseURL: false),
+              !escapesASCII(components.percentEncodedHost)
         else { return nil }
+        // Newer Foundations give `percentEncodedHost` an `xn--` name decoded
+        // to Unicode and escaped; `encodedHost` keeps the ASCII name the
+        // connection resolves. Older ones write it as given in both.
+        let written: String?
+        if #available(iOS 16, macCatalyst 16, *) {
+            written = components.encodedHost
+        } else {
+            written = components.percentEncodedHost
+        }
+        guard let written, !written.contains("%") else { return nil }
         var host = written.lowercased()
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
         while host.hasSuffix(".") { host.removeLast() }
         return host.isEmpty ? nil : host
+    }
+
+    /// Whether `host` has a `%` that is not the escape of a non-ASCII byte:
+    /// a percent-encoded ASCII character (`%2E`, `%68`), an IPv6 zone
+    /// (`%25`), or a stray `%`. Escaped non-ASCII bytes are how a Unicode
+    /// name reads in `percentEncodedHost`.
+    private static func escapesASCII(_ host: String?) -> Bool {
+        guard let host else { return false }
+        let escapes = host.utf8.split(separator: UInt8(ascii: "%"), omittingEmptySubsequences: false).dropFirst()
+        return escapes.contains { escape in
+            let digits = String(decoding: escape.prefix(2), as: UTF8.self)
+            guard digits.count == 2, digits.allSatisfy(\.isHexDigit), let byte = UInt8(digits, radix: 16)
+            else { return true }
+            return byte < 0x80
+        }
     }
 
     /// Names the stock hosts files of macOS and Linux distributions give
