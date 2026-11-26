@@ -270,6 +270,7 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
             )
         }
         let tokens = try await provider.tokens(nil)
+        let url = self.url
         let (union, metadataURL): (String?, URL?) = state.withLockedValue { state in
             if let metadataURL = challenge.resourceMetadataURL,
                MCPOAuth.isAllowedEndpoint(metadataURL, serverURL: url) {
@@ -279,7 +280,6 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
             return (state.scope, state.resourceMetadataURL)
         }
         let interactive = auth?.isInteractive ?? false
-        let url = url
         let http = authHTTPClient
         let result = try await authGate.run {
             try await MCPOAuth.auth(provider, options: MCPOAuthOptions(
