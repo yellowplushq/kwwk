@@ -14481,6 +14481,85 @@
         "xhigh" : null
       }
     },
+    "accounts\/fireworks\/routers\/glm-5p3-flash-flex" : {
+      "api" : "openai-completions",
+      "baseUrl" : "https:\/\/api.fireworks.ai\/inference\/v1",
+      "compat" : {
+        "sendSessionAffinityHeaders" : true,
+        "supportsLongCacheRetention" : false,
+        "supportsStore" : false,
+        "supportsStrictMode" : true
+      },
+      "contextWindow" : 1048573,
+      "cost" : {
+        "cacheRead" : 0.014999999999999999,
+        "cacheWrite" : 0,
+        "input" : 0.074999999999999997,
+        "output" : 0.25
+      },
+      "id" : "accounts\/fireworks\/routers\/glm-5p3-flash-flex",
+      "input" : [
+        "text",
+        "image"
+      ],
+      "inputLimits" : {
+        "images" : {
+          "resize" : {
+            "jpegQuality" : 80,
+            "maxBytes" : 4718592,
+            "maxHeight" : 2000,
+            "maxWidth" : 2000
+          }
+        }
+      },
+      "maxTokens" : 131072,
+      "name" : "GLM 5.3 Flash Flex",
+      "provider" : "fireworks",
+      "reasoning" : true,
+      "thinkingLevelMap" : {
+        "high" : "high",
+        "low" : "low",
+        "max" : "max",
+        "medium" : null,
+        "minimal" : null,
+        "off" : null,
+        "xhigh" : null
+      }
+    },
+    "accounts\/fireworks\/routers\/glm-5p3-flex" : {
+      "api" : "openai-completions",
+      "baseUrl" : "https:\/\/api.fireworks.ai\/inference\/v1",
+      "compat" : {
+        "sendSessionAffinityHeaders" : true,
+        "supportsLongCacheRetention" : false,
+        "supportsStore" : false,
+        "supportsStrictMode" : true
+      },
+      "contextWindow" : 1048573,
+      "cost" : {
+        "cacheRead" : 0.13,
+        "cacheWrite" : 0,
+        "input" : 0.7,
+        "output" : 2.2
+      },
+      "id" : "accounts\/fireworks\/routers\/glm-5p3-flex",
+      "input" : [
+        "text"
+      ],
+      "maxTokens" : 262144,
+      "name" : "GLM 5.3 Flex",
+      "provider" : "fireworks",
+      "reasoning" : true,
+      "thinkingLevelMap" : {
+        "high" : "high",
+        "low" : "low",
+        "max" : "max",
+        "medium" : null,
+        "minimal" : null,
+        "off" : null,
+        "xhigh" : null
+      }
+    },
     "accounts\/fireworks\/routers\/glm-5p3-spot" : {
       "api" : "openai-completions",
       "baseUrl" : "https:\/\/api.fireworks.ai\/inference\/v1",
@@ -18656,8 +18735,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.7453340000000001,
-        "output" : 1.5016
+        "input" : 0.888188,
+        "output" : 1.5082
       },
       "id" : "deepseek-ai\/DeepSeek-V4-Pro",
       "input" : [
@@ -19185,8 +19264,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.1,
-        "output" : 0.32
+        "input" : 0.22,
+        "output" : 0.5
       },
       "id" : "meta-llama\/Llama-3.3-70B-Instruct",
       "input" : [
@@ -20213,12 +20292,12 @@
       "compat" : {
         "supportsStrictMode" : true
       },
-      "contextWindow" : 131072,
+      "contextWindow" : 262144,
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.15,
-        "output" : 0.75
+        "input" : 0.089999999999999997,
+        "output" : 0.55
       },
       "id" : "Qwen\/Qwen3-235B-A22B-Instruct-2507",
       "input" : [
@@ -21580,8 +21659,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.042000000000000003,
-        "output" : 0.184
+        "input" : 0.0356,
+        "output" : 0.081500000000000003
       },
       "id" : "zai-org\/GLM-5.3-Flash",
       "input" : [
@@ -29983,6 +30062,39 @@
         "xhigh" : "xhigh"
       }
     },
+    "seaglass-alpha-free" : {
+      "api" : "openai-completions",
+      "baseUrl" : "https:\/\/opencode.ai\/inference\/openai\/v1",
+      "compat" : {
+        "maxTokensField" : "max_tokens",
+        "supportsStore" : false,
+        "supportsStrictMode" : true
+      },
+      "contextWindow" : 1048576,
+      "cost" : {
+        "cacheRead" : 0,
+        "cacheWrite" : 0,
+        "input" : 0,
+        "output" : 0
+      },
+      "id" : "seaglass-alpha-free",
+      "input" : [
+        "text"
+      ],
+      "maxTokens" : 131072,
+      "name" : "Seaglass Alpha Free",
+      "provider" : "opencode",
+      "reasoning" : true,
+      "thinkingLevelMap" : {
+        "high" : "high",
+        "low" : "low",
+        "max" : "max",
+        "medium" : "medium",
+        "minimal" : "minimal",
+        "off" : null,
+        "xhigh" : "xhigh"
+      }
+    },
     "tidepool-alpha-free" : {
       "api" : "openai-completions",
       "baseUrl" : "https:\/\/opencode.ai\/inference\/openai\/v1",
@@ -31472,16 +31584,16 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.099900000000000003,
+        "cacheRead" : 0.097000000000000003,
         "cacheWrite" : 0,
-        "input" : 0.099900000000000003,
-        "output" : 5
+        "input" : 0.111,
+        "output" : 4.44
       },
       "id" : "~deepseek\/deepseek-pro-latest",
       "input" : [
         "text"
       ],
-      "maxTokens" : 393216,
+      "maxTokens" : 943718,
       "name" : "DeepSeek: DeepSeek Pro Latest",
       "provider" : "openrouter",
       "reasoning" : true,
@@ -34419,7 +34531,7 @@
         "cacheRead" : 0.2,
         "cacheWrite" : 0,
         "input" : 0.888188,
-        "output" : 1.5463
+        "output" : 1.5082
       },
       "id" : "deepseek\/deepseek-v4-pro",
       "input" : [
@@ -34529,10 +34641,10 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.0030000000000000001,
+        "cacheRead" : 0.0060000000000000001,
         "cacheWrite" : 0,
-        "input" : 0.15,
-        "output" : 0.6
+        "input" : 0.3,
+        "output" : 1.2
       },
       "id" : "deepseek\/deepseek-v4.1-flash-1017",
       "input" : [
@@ -36194,10 +36306,10 @@
       },
       "contextWindow" : 131072,
       "cost" : {
-        "cacheRead" : 0,
+        "cacheRead" : 0.040000000000000001,
         "cacheWrite" : 0,
         "input" : 0.080000000000000002,
-        "output" : 0.16
+        "output" : 0.45
       },
       "id" : "google\/gemma-3-27b-it",
       "input" : [
@@ -36214,7 +36326,7 @@
           }
         }
       },
-      "maxTokens" : 16384,
+      "maxTokens" : 117964,
       "name" : "Google: Gemma 3 27B",
       "provider" : "openrouter",
       "reasoning" : false
@@ -36229,10 +36341,10 @@
       },
       "contextWindow" : 262144,
       "cost" : {
-        "cacheRead" : 0.042500000000000003,
+        "cacheRead" : 0.050000000000000003,
         "cacheWrite" : 0,
-        "input" : 0.076499999999999999,
-        "output" : 0.255
+        "input" : 0.089999999999999997,
+        "output" : 0.3
       },
       "id" : "google\/gemma-4-26b-a4b-it",
       "input" : [
@@ -37355,10 +37467,10 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.0074999999999999997,
+        "cacheRead" : 0.014999999999999999,
         "cacheWrite" : 0,
-        "input" : 0.074999999999999997,
-        "output" : 0.3
+        "input" : 0.15,
+        "output" : 0.6
       },
       "id" : "minimax\/minimax-m3.1-flash",
       "input" : [
@@ -44901,10 +45013,10 @@
       },
       "contextWindow" : 262144,
       "cost" : {
-        "cacheRead" : 0.017500000000000002,
+        "cacheRead" : 0.058999999999999997,
         "cacheWrite" : 0,
-        "input" : 0.035000000000000003,
-        "output" : 1.5
+        "input" : 0.059999999999999998,
+        "output" : 1.96
       },
       "id" : "qwen\/qwen3.8-27b",
       "input" : [
@@ -44921,7 +45033,7 @@
           }
         }
       },
-      "maxTokens" : 131072,
+      "maxTokens" : 235929,
       "name" : "Qwen: Qwen3.8 27B",
       "provider" : "openrouter",
       "reasoning" : true,
@@ -47150,12 +47262,12 @@
         "supportsStrictMode" : true,
         "thinkingFormat" : "openrouter"
       },
-      "contextWindow" : 1048576,
+      "contextWindow" : 1048575,
       "cost" : {
-        "cacheRead" : 0.02,
+        "cacheRead" : 0.029999999999999999,
         "cacheWrite" : 0,
-        "input" : 0.12,
-        "output" : 0.38
+        "input" : 0.15,
+        "output" : 0.5
       },
       "id" : "z-ai\/glm-5.3-flash",
       "input" : [
@@ -47172,7 +47284,7 @@
           }
         }
       },
-      "maxTokens" : 943718,
+      "maxTokens" : 943717,
       "name" : "Z.ai: GLM 5.3 Flash",
       "provider" : "openrouter",
       "reasoning" : true,
@@ -50002,8 +50114,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50051,8 +50163,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50100,8 +50212,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50145,8 +50257,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50198,8 +50310,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50246,8 +50358,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50290,8 +50402,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50338,8 +50450,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50386,8 +50498,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50435,8 +50547,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50479,8 +50591,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -50527,8 +50639,8 @@
       "providers" : [
         {
           "credential" : "radius",
-          "id" : "anthropic",
-          "name" : "Anthropic",
+          "id" : "vercel-ai-gateway",
+          "name" : "Vercel AI Gateway",
           "source" : "radius"
         }
       ],
@@ -51848,40 +51960,6 @@
     }
   },
   "together" : {
-    "deepseek-ai\/DeepSeek-V4-Pro-0813" : {
-      "api" : "openai-completions",
-      "baseUrl" : "https:\/\/api.together.ai\/v1",
-      "compat" : {
-        "maxTokensField" : "max_tokens",
-        "supportsLongCacheRetention" : false,
-        "supportsReasoningEffort" : true,
-        "supportsStore" : false,
-        "supportsStrictMode" : false,
-        "thinkingFormat" : "together"
-      },
-      "contextWindow" : 1048576,
-      "cost" : {
-        "cacheRead" : 0.13,
-        "cacheWrite" : 0,
-        "input" : 1.32,
-        "output" : 3.96
-      },
-      "id" : "deepseek-ai\/DeepSeek-V4-Pro-0813",
-      "input" : [
-        "text"
-      ],
-      "maxTokens" : 384000,
-      "name" : "DeepSeek V4 Pro 0813",
-      "provider" : "together",
-      "reasoning" : true,
-      "thinkingLevelMap" : {
-        "high" : "high",
-        "low" : null,
-        "medium" : null,
-        "minimal" : null,
-        "xhigh" : null
-      }
-    },
     "deepseek-ai\/DeepSeek-V4.1-Flash" : {
       "api" : "openai-completions",
       "baseUrl" : "https:\/\/api.together.ai\/v1",
@@ -52310,42 +52388,6 @@
         "low" : null,
         "medium" : null,
         "minimal" : null
-      }
-    },
-    "openai\/gpt-oss-120b" : {
-      "api" : "openai-completions",
-      "baseUrl" : "https:\/\/api.together.ai\/v1",
-      "compat" : {
-        "maxTokensField" : "max_tokens",
-        "supportsLongCacheRetention" : false,
-        "supportsReasoningEffort" : true,
-        "supportsStore" : false,
-        "supportsStrictMode" : false,
-        "thinkingFormat" : "openai"
-      },
-      "contextWindow" : 131072,
-      "cost" : {
-        "cacheRead" : 0,
-        "cacheWrite" : 0,
-        "input" : 0.15,
-        "output" : 0.6
-      },
-      "id" : "openai\/gpt-oss-120b",
-      "input" : [
-        "text"
-      ],
-      "maxTokens" : 131072,
-      "name" : "GPT OSS 120B",
-      "provider" : "together",
-      "reasoning" : true,
-      "thinkingLevelMap" : {
-        "high" : "high",
-        "low" : "low",
-        "max" : null,
-        "medium" : "medium",
-        "minimal" : null,
-        "off" : null,
-        "xhigh" : null
       }
     },
     "Prism-ML\/Ternary-Bonsai-27B" : {
@@ -62415,7 +62457,7 @@
         }
       },
       "maxTokens" : 64000,
-      "name" : "Tencent Hy4 Flash",
+      "name" : "Hy4 Flash",
       "provider" : "vercel-ai-gateway",
       "reasoning" : true
     },
