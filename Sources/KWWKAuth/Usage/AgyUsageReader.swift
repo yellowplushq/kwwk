@@ -29,6 +29,12 @@ public actor AgyHubVersion {
         self.fixed = fixed
     }
 
+    /// Returns the cached Hub version (or the fixed/compiled-in fallback)
+    /// without issuing a network request.
+    public var cachedOrFallback: String {
+        fixed ?? version
+    }
+
     /// Returns the Hub version to present in the `User-Agent` header.
     public func current(client: HTTPClient = URLSessionHTTPClient()) async -> String {
         if let fixed { return fixed }
@@ -167,17 +173,33 @@ public struct AgyUsageReader: OAuthUsageReader {
                 paidTier: Self.extra(credentials, "paidTier")
             )
         }
+        return try await Self.loadCodeAssist(
+            access: credentials.access,
+            productionHost: productionHost,
+            userAgent: userAgent,
+            client: client
+        )
+    }
+
+    /// Calls `POST <productionHost>/v1internal:loadCodeAssist` to resolve the
+    /// account's Code Assist companion project and tier metadata.
+    static func loadCodeAssist(
+        access: String,
+        productionHost: URL = AgyUsageReader.defaultProductionHost,
+        userAgent: String,
+        client: HTTPClient
+    ) async throws -> AccountInfo {
         let reply = try await postJSON(
             host: productionHost,
             method: "loadCodeAssist",
             body: ["metadata": ["ideType": "ANTIGRAVITY"]],
-            access: credentials.access,
+            access: access,
             userAgent: userAgent,
             client: client
         )
-        guard let projectId = Self.companionProject(reply["cloudaicompanionProject"]) else {
+        guard let projectId = companionProject(reply["cloudaicompanionProject"]) else {
             throw OAuthUsageError.unavailable(
-                providerId: providerId,
+                providerId: AgyOAuth.providerId,
                 status: nil,
                 detail: "Antigravity account has no Code Assist project"
             )
@@ -185,6 +207,39 @@ public struct AgyUsageReader: OAuthUsageReader {
         let currentTier = (reply["currentTier"] as? [String: Any])?["id"] as? String
         let paidTier = (reply["paidTier"] as? [String: Any])?["id"] as? String
         return AccountInfo(projectId: projectId, tier: currentTier, paidTier: paidTier)
+    }
+
+    /// Best-effort Code Assist project discovery bounded by `timeoutSeconds`.
+    /// Uses the cached/fallback Hub 2.x User-Agent (no manifest network call)
+    /// and returns `nil` on any failure, timeout, or missing project so OAuth
+    /// login and refresh are never blocked.
+    static func bestEffortProjectId(
+        access: String,
+        productionHost: URL = AgyUsageReader.defaultProductionHost,
+        hubVersion: AgyHubVersion = .shared,
+        timeoutSeconds: Double = AgyOAuth.projectLookupTimeoutSeconds,
+        client: HTTPClient
+    ) async -> String? {
+        let version = await hubVersion.cachedOrFallback
+        let userAgent = Self.userAgent(version: version)
+        let boundedTimeout = max(timeoutSeconds, 0)
+        return await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                try? await Self.loadCodeAssist(
+                    access: access,
+                    productionHost: productionHost,
+                    userAgent: userAgent,
+                    client: client
+                ).projectId
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(boundedTimeout * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     private func fetchAvailableModels(
@@ -205,7 +260,7 @@ public struct AgyUsageReader: OAuthUsageReader {
                 body["entitlement"] = ["userTier": tier]
             }
             do {
-                return try await postJSON(
+                return try await Self.postJSON(
                     host: dailyHost,
                     method: "fetchAvailableModels",
                     body: body,
@@ -232,10 +287,28 @@ public struct AgyUsageReader: OAuthUsageReader {
         userAgent: String,
         client: HTTPClient
     ) async throws -> [String: Any] {
+        try await Self.postJSON(
+            host: host,
+            method: method,
+            body: body,
+            access: access,
+            userAgent: userAgent,
+            client: client
+        )
+    }
+
+    private static func postJSON(
+        host: URL,
+        method: String,
+        body: [String: Any],
+        access: String,
+        userAgent: String,
+        client: HTTPClient
+    ) async throws -> [String: Any] {
         var base = host.absoluteString
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: "\(base)/v1internal:\(method)") else {
-            throw OAuthUsageError.unavailable(providerId: providerId, status: nil, detail: "invalid endpoint URL")
+            throw OAuthUsageError.unavailable(providerId: AgyOAuth.providerId, status: nil, detail: "invalid endpoint URL")
         }
         let encoded = try JSONSerialization.data(withJSONObject: body)
         let (response, data) = try await OAuthUsage.get(
@@ -248,12 +321,12 @@ public struct AgyUsageReader: OAuthUsageReader {
             ],
             method: "POST",
             body: encoded,
-            provider: providerId,
+            provider: AgyOAuth.providerId,
             client: client
         )
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw OAuthUsageError.unavailable(
-                providerId: providerId,
+                providerId: AgyOAuth.providerId,
                 status: response.statusCode,
                 detail: "undecodable body"
             )

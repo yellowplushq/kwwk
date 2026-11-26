@@ -1,5 +1,8 @@
 import Crypto
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import KWWKAuth
 
@@ -76,12 +79,13 @@ struct AgyOAuthTests {
         #expect(scopes.count == 7)
     }
 
-    @Test("loginAgy requests a dynamic loopback port (0), uses the bound redirect_uri, exchanges code with PKCE verifier and saves userinfo email")
+    @Test("loginAgy requests a dynamic loopback port (0), uses the bound redirect_uri, exchanges code with PKCE verifier and saves userinfo email and projectId")
     func loginSuccessWithUserInfoEmail() async throws {
         #expect(AgyOAuth.callbackPort == 0)
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.access","refresh_token":"1//refresh","expires_in":3600}"#),
             .response(status: 200, body: #"{"email":"dev@example.com","name":"Dev"}"#),
+            .response(status: 200, body: #"{"cloudaicompanionProject":"proj-login-1","currentTier":{"id":"free-tier"}}"#),
         ])
         let presenter = RecordingPresenter()
         let made = LoopbackBox()
@@ -96,7 +100,8 @@ struct AgyOAuthTests {
                 made: made,
                 recordedPort: { port in askedPortLock.withLock { askedPort = port } }
             ),
-            client: client
+            client: client,
+            hubVersion: AgyHubVersion(fixed: "2.35.1")
         )
 
         #expect(askedPortLock.withLock { askedPort } == 0)
@@ -115,7 +120,7 @@ struct AgyOAuthTests {
         #expect(scopes == Set(AgyOAuth.scopes))
 
         // Verify token exchange request
-        #expect(client.requestCount == 2)
+        #expect(client.requestCount == 3)
         let tokenReq = client.requests[0]
         #expect(tokenReq.url == AgyOAuth.tokenURL)
         #expect(tokenReq.method == "POST")
@@ -138,10 +143,19 @@ struct AgyOAuthTests {
         #expect(infoReq.method == "GET")
         #expect(client.header("authorization", request: 1) == "Bearer ya29.access")
 
+        // Verify best-effort loadCodeAssist request
+        let loadReq = client.requests[2]
+        #expect(loadReq.url.absoluteString == "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+        #expect(loadReq.method == "POST")
+        #expect(client.header("Authorization", request: 2) == "Bearer ya29.access")
+        #expect(client.header("User-Agent", request: 2)?.hasPrefix("antigravity/hub/2.35.1 ") == true)
+
         #expect(credentials.access == "ya29.access")
         #expect(credentials.refresh == "1//refresh")
         #expect(AgyOAuth.email(credentials) == "dev@example.com")
         #expect(credentials.extras["email"] == .string("dev@example.com"))
+        #expect(AgyOAuth.projectId(credentials) == "proj-login-1")
+        #expect(credentials.extras["projectId"] == .string("proj-login-1"))
         #expect(credentials.expires >= before + (3600 - 300) * 1000)
         #expect(credentials.expires <= Int64(Date().timeIntervalSince1970 * 1000) + (3600 - 300) * 1000)
     }
@@ -152,30 +166,55 @@ struct AgyOAuthTests {
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.a","refresh_token":"1//r","expires_in":3600,"id_token":"\#(idToken)"}"#),
             .response(status: 500, body: "userinfo down"),
+            .response(status: 200, body: #"{"cloudaicompanionProject":{"id":"proj-obj-1"}}"#),
         ])
 
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
-            client: client
+            client: client,
+            hubVersion: AgyHubVersion(fixed: "2.35.1")
         )
         #expect(credentials.access == "ya29.a")
         #expect(AgyOAuth.email(credentials) == "jwt-user@example.com")
+        #expect(AgyOAuth.projectId(credentials) == "proj-obj-1")
     }
 
-    @Test("loginAgy succeeds without email when both userinfo and id_token are unavailable")
+    @Test("loginAgy succeeds without email or projectId when userinfo and loadCodeAssist fail")
     func loginSucceedsWithoutEmail() async throws {
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.a","refresh_token":"1//r","expires_in":3600}"#),
             .failure(URLError(.timedOut)),
+            .response(status: 500, body: "loadCodeAssist unavailable"),
         ])
 
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
-            client: client
+            client: client,
+            hubVersion: AgyHubVersion(fixed: "2.35.1")
         )
         #expect(credentials.access == "ya29.a")
         #expect(AgyOAuth.email(credentials) == nil)
         #expect(credentials.extras["email"] == nil)
+        #expect(AgyOAuth.projectId(credentials) == nil)
+        #expect(credentials.extras["projectId"] == nil)
+    }
+
+    @Test("loginAgy succeeds without projectId when loadCodeAssist times out")
+    func loginIgnoresLoadCodeAssistTimeout() async throws {
+        let client = SlowProjectLookupHTTPClient(initialResponses: [
+            .response(status: 200, body: #"{"access_token":"ya29.slow","refresh_token":"1//r","expires_in":3600}"#),
+            .response(status: 200, body: #"{"email":"slow@example.com"}"#),
+        ])
+
+        let credentials = try await OAuthLogin.loginAgy(
+            callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
+            client: client,
+            hubVersion: AgyHubVersion(fixed: "2.35.1"),
+            projectLookupTimeoutSeconds: 0.05
+        )
+        #expect(credentials.access == "ya29.slow")
+        #expect(AgyOAuth.email(credentials) == "slow@example.com")
+        #expect(AgyOAuth.projectId(credentials) == nil)
     }
 
     @Test("loginAgy refuses missing/mismatched state and missing code before exchanging", arguments: [
@@ -225,24 +264,30 @@ struct AgyOAuthTests {
 
     // MARK: - Refresh
 
-    @Test("AgyOAuthProvider.refresh preserves refresh token and extras when Google omits refresh_token")
-    func refreshPreservesRefreshTokenAndExtras() async throws {
+    @Test("AgyOAuthProvider.refresh preserves refresh token and already-cached projectId without calling loadCodeAssist")
+    func refreshPreservesRefreshTokenAndCachedProjectId() async throws {
         let stale = OAuthCredentials(
             access: "old-access",
             refresh: "1//kept-refresh",
             expires: 0,
-            extras: ["email": .string("dev@example.com"), "baseUrl": .string("https://relay.example.com")]
+            extras: [
+                "email": .string("dev@example.com"),
+                "baseUrl": .string("https://relay.example.com"),
+                "projectId": .string("proj-existing"),
+            ]
         )
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.fresh","expires_in":3599}"#),
         ])
         let before = Int64(Date().timeIntervalSince1970 * 1000)
 
-        let refreshed = try await AgyOAuthProvider().refresh(stale, using: client)
+        let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: client)
 
+        #expect(client.requestCount == 1)
         #expect(refreshed.access == "ya29.fresh")
         #expect(refreshed.refresh == "1//kept-refresh")
         #expect(refreshed.extras == stale.extras)
+        #expect(AgyOAuth.projectId(refreshed) == "proj-existing")
         #expect(refreshed.expires >= before + (3599 - 300) * 1000)
         #expect(refreshed.expires <= Int64(Date().timeIntervalSince1970 * 1000) + (3599 - 300) * 1000)
 
@@ -257,16 +302,49 @@ struct AgyOAuthTests {
         #expect(form["client_secret"] == AgyOAuth.clientSecret)
     }
 
-    @Test("AgyOAuthProvider.refresh adopts a rotated refresh token when returned")
-    func refreshAdoptsNewRefreshToken() async throws {
-        let stale = OAuthCredentials(access: "old", refresh: "1//old", expires: 0)
-        let client = QueuedHTTPClient([
+    @Test("AgyOAuthProvider.refresh backfills missing or empty projectId via loadCodeAssist using the new access token")
+    func refreshBackfillsMissingProjectId() async throws {
+        for initialExtras in [[:], ["email": .string("legacy@example.com"), "projectId": .string("")]] as [[String: JSONValue]] {
+            let stale = OAuthCredentials(access: "old", refresh: "1//r", expires: 0, extras: initialExtras)
+            let client = QueuedHTTPClient([
+                .response(status: 200, body: #"{"access_token":"ya29.refreshed","expires_in":3600}"#),
+                .response(status: 200, body: #"{"cloudaicompanionProject":"proj-backfilled"}"#),
+            ])
+
+            let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: client)
+            #expect(client.requestCount == 2)
+            #expect(client.requests[1].url.absoluteString == "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+            #expect(client.header("Authorization", request: 1) == "Bearer ya29.refreshed")
+            #expect(client.header("User-Agent", request: 1)?.hasPrefix("antigravity/hub/2.35.1 ") == true)
+            #expect(AgyOAuth.projectId(refreshed) == "proj-backfilled")
+            #expect(refreshed.extras["projectId"] == .string("proj-backfilled"))
+        }
+    }
+
+    @Test("AgyOAuthProvider.refresh still succeeds when best-effort loadCodeAssist fails or times out")
+    func refreshIgnoresLoadCodeAssistFailureAndTimeout() async throws {
+        let stale = OAuthCredentials(access: "old", refresh: "1//old", expires: 0, extras: ["email": .string("u@example.com")])
+        let failClient = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.new","refresh_token":"1//rotated","expires_in":3600}"#),
+            .response(status: 500, body: "server error"),
         ])
 
-        let refreshed = try await AgyOAuthProvider().refresh(stale, using: client)
+        let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: failClient)
+        #expect(failClient.requestCount == 2)
         #expect(refreshed.access == "ya29.new")
         #expect(refreshed.refresh == "1//rotated")
+        #expect(AgyOAuth.projectId(refreshed) == nil)
+        #expect(refreshed.extras["email"] == .string("u@example.com"))
+
+        let slowClient = SlowProjectLookupHTTPClient(initialResponses: [
+            .response(status: 200, body: #"{"access_token":"ya29.timeout","expires_in":3600}"#),
+        ])
+        let timedOut = try await AgyOAuthProvider(
+            hubVersion: AgyHubVersion(fixed: "2.35.1"),
+            projectLookupTimeoutSeconds: 0.05
+        ).refresh(stale, using: slowClient)
+        #expect(timedOut.access == "ya29.timeout")
+        #expect(AgyOAuth.projectId(timedOut) == nil)
     }
 
     @Test("AgyOAuthProvider.refresh classifies invalid_grant as rejected and 429/500/transport as unavailable")
@@ -323,6 +401,7 @@ struct AgyOAuthTests {
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.sub","refresh_token":"1//sub","expires_in":3600}"#),
             .response(status: 200, body: #"{"email":"sub@example.com"}"#),
+            .response(status: 200, body: #"{"cloudaicompanionProject":"proj-sub"}"#),
         ])
         let creds = try await OAuthSubscriptions.login(
             providerId: "agy",
@@ -332,5 +411,50 @@ struct AgyOAuthTests {
         #expect(creds.access == "ya29.sub")
         #expect(creds.refresh == "1//sub")
         #expect(AgyOAuth.email(creds) == "sub@example.com")
+        #expect(AgyOAuth.projectId(creds) == "proj-sub")
+    }
+}
+
+/// Serves queued initial responses, then hangs on subsequent requests until cancelled.
+private final class SlowProjectLookupHTTPClient: HTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var responses: [QueuedHTTPClient.Answer]
+
+    init(initialResponses: [QueuedHTTPClient.Answer]) {
+        self.responses = initialResponses
+    }
+
+    func stream(
+        url: URL,
+        method: String,
+        headers: [String: String],
+        body: Data?,
+        cancellation: CancellationHandle?
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        let next: QueuedHTTPClient.Answer? = lock.withLock {
+            responses.isEmpty ? nil : responses.removeFirst()
+        }
+        guard let next else {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            throw URLError(.timedOut)
+        }
+        switch next {
+        case .failure(let error):
+            throw error
+        case .response(let status, let body, let extra):
+            var fields = ["content-type": "application/json"]
+            for (k, v) in extra { fields[k] = v }
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: fields
+            )!
+            let data = Data(body.utf8)
+            return (response, AsyncThrowingStream { continuation in
+                continuation.yield(data)
+                continuation.finish()
+            })
+        }
     }
 }
