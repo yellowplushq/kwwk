@@ -19,14 +19,20 @@ public actor AgyHubVersion {
         string: "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml"
     )!
     public static let cacheLifetime: TimeInterval = 6 * 60 * 60
+    public static let fetchTimeoutSeconds: TimeInterval = 10
 
     private let fixed: String?
+    private let fetchTimeout: TimeInterval
     private var version = AgyHubVersion.fallback
     private var askedAt: Date?
     private var inFlight: Task<String, Never>?
 
-    public init(fixed: String? = nil) {
+    public init(
+        fixed: String? = nil,
+        fetchTimeoutSeconds: TimeInterval = AgyHubVersion.fetchTimeoutSeconds
+    ) {
         self.fixed = fixed
+        self.fetchTimeout = max(fetchTimeoutSeconds, 0)
     }
 
     /// Returns the cached Hub version (or the fixed/compiled-in fallback)
@@ -45,8 +51,9 @@ public actor AgyHubVersion {
             return await inFlight.value
         }
         let currentFallback = version
+        let timeout = fetchTimeout
         let task = Task<String, Never> {
-            await Self.fetch(client: client) ?? currentFallback
+            await Self.fetch(client: client, timeoutSeconds: timeout) ?? currentFallback
         }
         inFlight = task
         let fetched = await task.value
@@ -56,16 +63,44 @@ public actor AgyHubVersion {
         return fetched
     }
 
-    static func fetch(client: HTTPClient) async -> String? {
-        guard let (response, body) = try? await client.request(
-            url: manifestURL,
-            method: "GET",
-            headers: ["User-Agent": "electron-builder"],
-            body: nil
-        ), (200..<300).contains(response.statusCode) else {
-            return nil
+    static func fetch(
+        client: HTTPClient,
+        timeoutSeconds: TimeInterval = fetchTimeoutSeconds
+    ) async -> String? {
+        let handle = CancellationHandle()
+        let boundedTimeout = max(timeoutSeconds, 0)
+        return await withTaskCancellationHandler {
+            await withTaskGroup(of: String?.self) { group in
+                group.addTask {
+                    guard let (response, body) = try? await client.request(
+                        url: manifestURL,
+                        method: "GET",
+                        headers: ["User-Agent": "electron-builder"],
+                        body: nil,
+                        cancellation: handle,
+                        timeoutSeconds: boundedTimeout
+                    ), (200..<300).contains(response.statusCode) else {
+                        return nil
+                    }
+                    return parse(manifest: String(decoding: body.prefix(64 << 10), as: UTF8.self))
+                }
+                group.addTask {
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(boundedTimeout * 1_000_000_000))
+                        handle.cancel(reason: "timeout")
+                    } catch {
+                        // Timer cancelled because the request finished or parent cancelled.
+                    }
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                handle.cancel(reason: "completed")
+                group.cancelAll()
+                return first
+            }
+        } onCancel: {
+            handle.cancel(reason: "cancelled")
         }
-        return parse(manifest: String(decoding: body.prefix(64 << 10), as: UTF8.self))
     }
 
     /// Extracts the `version:` value when it contains only digits and dots.
@@ -105,6 +140,7 @@ public struct AgyUsageReader: OAuthUsageReader {
 
     public static let defaultProductionHost = URL(string: "https://cloudcode-pa.googleapis.com")!
     public static let defaultDailyHost = URL(string: "https://daily-cloudcode-pa.googleapis.com")!
+    public static let quotaRequestTimeoutSeconds: TimeInterval = 15
 
     public init(
         productionHost: URL = AgyUsageReader.defaultProductionHost,
@@ -117,40 +153,54 @@ public struct AgyUsageReader: OAuthUsageReader {
     }
 
     public func usage(_ credentials: OAuthCredentials, using client: HTTPClient) async throws -> [OAuthUsageWindow] {
-        let version = await hubVersion.current(client: client)
-        let ua = Self.userAgent(version: version)
+        let handle = CancellationHandle()
+        return try await withTaskCancellationHandler {
+            let version = await hubVersion.current(client: client)
+            try Task.checkCancellation()
+            let ua = Self.userAgent(version: version)
 
-        let account = try await resolveAccount(credentials: credentials, userAgent: ua, client: client)
-
-        // Primary source: `retrieveUserQuotaSummary` returns Google's canonical
-        // pooled groups (e.g. Gemini Models, Claude and GPT models) with exact
-        // 5-hour and weekly buckets.
-        do {
-            let summary = try await postJSON(
-                host: dailyHost,
-                method: "retrieveUserQuotaSummary",
-                body: ["project": account.projectId],
-                access: credentials.access,
+            let account = try await resolveAccount(
+                credentials: credentials,
                 userAgent: ua,
+                cancellation: handle,
                 client: client
             )
-            let windows = Self.windows(fromSummary: summary)
-            if !windows.isEmpty {
-                return windows
-            }
-        } catch OAuthUsageError.unavailable(_, let status?, _) where status == 404 || status == 501 {
-            // Endpoint absent/unsupported on this host: fall through to model-level quota aggregation.
-        }
 
-        // Fallback: aggregate per-model quotas from `fetchAvailableModels` into
-        // family pools so callers still receive concise, deduplicated windows.
-        let models = try await fetchAvailableModels(
-            account: account,
-            access: credentials.access,
-            userAgent: ua,
-            client: client
-        )
-        return Self.windows(fromModels: models)
+            // Primary source: `retrieveUserQuotaSummary` returns Google's canonical
+            // pooled groups (e.g. Gemini Models, Claude and GPT models) with exact
+            // 5-hour and weekly buckets.
+            do {
+                let summary = try await postJSON(
+                    host: dailyHost,
+                    method: "retrieveUserQuotaSummary",
+                    body: ["project": account.projectId],
+                    access: credentials.access,
+                    userAgent: ua,
+                    cancellation: handle,
+                    timeoutSeconds: Self.quotaRequestTimeoutSeconds,
+                    client: client
+                )
+                let windows = Self.windows(fromSummary: summary)
+                if !windows.isEmpty {
+                    return windows
+                }
+            } catch OAuthUsageError.unavailable(_, let status?, _) where status == 404 || status == 501 {
+                // Endpoint absent/unsupported on this host: fall through to model-level quota aggregation.
+            }
+
+            // Fallback: aggregate per-model quotas from `fetchAvailableModels` into
+            // family pools so callers still receive concise, deduplicated windows.
+            let models = try await fetchAvailableModels(
+                account: account,
+                access: credentials.access,
+                userAgent: ua,
+                cancellation: handle,
+                client: client
+            )
+            return Self.windows(fromModels: models)
+        } onCancel: {
+            handle.cancel(reason: "cancelled")
+        }
     }
 
     // MARK: - Wire helpers
@@ -164,6 +214,7 @@ public struct AgyUsageReader: OAuthUsageReader {
     private func resolveAccount(
         credentials: OAuthCredentials,
         userAgent: String,
+        cancellation: CancellationHandle?,
         client: HTTPClient
     ) async throws -> AccountInfo {
         if let projectId = AgyOAuth.projectId(credentials) {
@@ -177,6 +228,8 @@ public struct AgyUsageReader: OAuthUsageReader {
             access: credentials.access,
             productionHost: productionHost,
             userAgent: userAgent,
+            cancellation: cancellation,
+            timeoutSeconds: AgyOAuth.projectLookupTimeoutSeconds,
             client: client
         )
     }
@@ -187,6 +240,8 @@ public struct AgyUsageReader: OAuthUsageReader {
         access: String,
         productionHost: URL = AgyUsageReader.defaultProductionHost,
         userAgent: String,
+        cancellation: CancellationHandle? = nil,
+        timeoutSeconds: TimeInterval? = AgyOAuth.projectLookupTimeoutSeconds,
         client: HTTPClient
     ) async throws -> AccountInfo {
         let reply = try await postJSON(
@@ -195,6 +250,8 @@ public struct AgyUsageReader: OAuthUsageReader {
             body: ["metadata": ["ideType": "ANTIGRAVITY"]],
             access: access,
             userAgent: userAgent,
+            cancellation: cancellation,
+            timeoutSeconds: timeoutSeconds,
             client: client
         )
         guard let projectId = companionProject(reply["cloudaicompanionProject"]) else {
@@ -211,8 +268,9 @@ public struct AgyUsageReader: OAuthUsageReader {
 
     /// Best-effort Code Assist project discovery bounded by `timeoutSeconds`.
     /// Uses the cached/fallback Hub 2.x User-Agent (no manifest network call)
-    /// and returns `nil` on any failure, timeout, or missing project so OAuth
-    /// login and refresh are never blocked.
+    /// and passes both `timeoutSeconds` and a `CancellationHandle` to the
+    /// underlying `HTTPClient` so a hung socket aborts immediately when the
+    /// timeout fires or the enclosing Swift `Task` is cancelled.
     static func bestEffortProjectId(
         access: String,
         productionHost: URL = AgyUsageReader.defaultProductionHost,
@@ -223,22 +281,35 @@ public struct AgyUsageReader: OAuthUsageReader {
         let version = await hubVersion.cachedOrFallback
         let userAgent = Self.userAgent(version: version)
         let boundedTimeout = max(timeoutSeconds, 0)
-        return await withTaskGroup(of: String?.self) { group in
-            group.addTask {
-                try? await Self.loadCodeAssist(
-                    access: access,
-                    productionHost: productionHost,
-                    userAgent: userAgent,
-                    client: client
-                ).projectId
+        let handle = CancellationHandle()
+        return await withTaskCancellationHandler {
+            await withTaskGroup(of: String?.self) { group in
+                group.addTask {
+                    try? await Self.loadCodeAssist(
+                        access: access,
+                        productionHost: productionHost,
+                        userAgent: userAgent,
+                        cancellation: handle,
+                        timeoutSeconds: boundedTimeout,
+                        client: client
+                    ).projectId
+                }
+                group.addTask {
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(boundedTimeout * 1_000_000_000))
+                        handle.cancel(reason: "timeout")
+                    } catch {
+                        // Sleep cancelled because loadCodeAssist finished or parent cancelled.
+                    }
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                handle.cancel(reason: "completed")
+                group.cancelAll()
+                return first
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(boundedTimeout * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+        } onCancel: {
+            handle.cancel(reason: "cancelled")
         }
     }
 
@@ -246,6 +317,7 @@ public struct AgyUsageReader: OAuthUsageReader {
         account: AccountInfo,
         access: String,
         userAgent: String,
+        cancellation: CancellationHandle?,
         client: HTTPClient
     ) async throws -> [String: Any] {
         let tiers = Self.tiersToAsk(tier: account.tier, paidTier: account.paidTier)
@@ -266,6 +338,8 @@ public struct AgyUsageReader: OAuthUsageReader {
                     body: body,
                     access: access,
                     userAgent: userAgent,
+                    cancellation: cancellation,
+                    timeoutSeconds: Self.quotaRequestTimeoutSeconds,
                     client: client
                 )
             } catch let error as OAuthUsageError {
@@ -285,6 +359,8 @@ public struct AgyUsageReader: OAuthUsageReader {
         body: [String: Any],
         access: String,
         userAgent: String,
+        cancellation: CancellationHandle?,
+        timeoutSeconds: TimeInterval?,
         client: HTTPClient
     ) async throws -> [String: Any] {
         try await Self.postJSON(
@@ -293,6 +369,8 @@ public struct AgyUsageReader: OAuthUsageReader {
             body: body,
             access: access,
             userAgent: userAgent,
+            cancellation: cancellation,
+            timeoutSeconds: timeoutSeconds,
             client: client
         )
     }
@@ -303,6 +381,8 @@ public struct AgyUsageReader: OAuthUsageReader {
         body: [String: Any],
         access: String,
         userAgent: String,
+        cancellation: CancellationHandle?,
+        timeoutSeconds: TimeInterval?,
         client: HTTPClient
     ) async throws -> [String: Any] {
         var base = host.absoluteString
@@ -322,6 +402,8 @@ public struct AgyUsageReader: OAuthUsageReader {
             method: "POST",
             body: encoded,
             provider: AgyOAuth.providerId,
+            cancellation: cancellation,
+            timeoutSeconds: timeoutSeconds,
             client: client
         )
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {

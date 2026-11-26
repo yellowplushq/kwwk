@@ -433,6 +433,47 @@ struct AgyUsageTests {
 
         let offline = AgyHubVersion()
         #expect(await offline.current(client: QueuedHTTPClient([.failure(URLError(.notConnectedToInternet))])) == AgyHubVersion.fallback)
+
+        // Hung manifest fetch aborts via CancellationHandle when fetchTimeoutSeconds elapses.
+        let hungManifest = HandleOnlyCancellingHTTPClient(initialResponses: [])
+        let start = Date()
+        let timedOutVersion = await AgyHubVersion(fetchTimeoutSeconds: 0.05).current(client: hungManifest)
+        #expect(Date().timeIntervalSince(start) < 2.0)
+        #expect(timedOutVersion == AgyHubVersion.fallback)
+        #expect(hungManifest.hungTimeoutSeconds == 0.05)
+        #expect(hungManifest.hungHadCancellationHandle == true)
+        #expect(hungManifest.cancelReasons == ["timeout"])
+    }
+
+    @Test("AgyUsageReader passes bounded timeouts and propagates parent Task cancellation to CancellationHandle")
+    func boundedTimeoutsAndTaskCancellation() async throws {
+        // 1. Cold path passes 10s for loadCodeAssist and 15s for retrieveUserQuotaSummary.
+        let recorder = HandleOnlyCancellingHTTPClient(initialResponses: [
+            .response(status: 200, body: #"{"cloudaicompanionProject":"p-timeout"}"#),
+            .response(status: 200, body: #"{"groups":[{"displayName":"Gemini Models","buckets":[{"window":"5h","remainingFraction":0.5}]}]}"#),
+        ])
+        let creds = OAuthCredentials(access: "ya29.t", refresh: "", expires: .max)
+        let windows = try await reader().usage(creds, using: recorder)
+        #expect(windows.count == 1)
+        #expect(recorder.recordedTimeouts == [10, 15])
+
+        // 2. Parent Task cancellation cancels a hung quota call via CancellationHandle immediately.
+        let hung = HandleOnlyCancellingHTTPClient(initialResponses: [])
+        let warmCreds = OAuthCredentials(access: "ya29.t", refresh: "", expires: .max, extras: ["projectId": "p-hung"])
+        let start = Date()
+        let task = Task {
+            try await reader().usage(warmCreds, using: hung)
+        }
+        await hung.waitUntilHung()
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+        #expect(Date().timeIntervalSince(start) < 2.0)
+        #expect(hung.hungTimeoutSeconds == 15)
+        #expect(hung.hungHadCancellationHandle == true)
+        #expect(hung.cancelReasons == ["cancelled"])
     }
 
     @Test("AgyUsageReader is registered in OAuthUsage.readers under agy")

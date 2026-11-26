@@ -199,22 +199,29 @@ struct AgyOAuthTests {
         #expect(credentials.extras["projectId"] == nil)
     }
 
-    @Test("loginAgy succeeds without projectId when loadCodeAssist times out")
+    @Test("loginAgy cancels hung loadCodeAssist via CancellationHandle on timeout and succeeds without projectId")
     func loginIgnoresLoadCodeAssistTimeout() async throws {
-        let client = SlowProjectLookupHTTPClient(initialResponses: [
+        let client = HandleOnlyCancellingHTTPClient(initialResponses: [
             .response(status: 200, body: #"{"access_token":"ya29.slow","refresh_token":"1//r","expires_in":3600}"#),
             .response(status: 200, body: #"{"email":"slow@example.com"}"#),
         ])
 
+        let start = Date()
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
             client: client,
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
             projectLookupTimeoutSeconds: 0.05
         )
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(elapsed < 2.0)
         #expect(credentials.access == "ya29.slow")
         #expect(AgyOAuth.email(credentials) == "slow@example.com")
         #expect(AgyOAuth.projectId(credentials) == nil)
+        #expect(client.hungTimeoutSeconds == 0.05)
+        #expect(client.hungHadCancellationHandle == true)
+        #expect(client.cancelReasons == ["timeout"])
     }
 
     @Test("loginAgy refuses missing/mismatched state and missing code before exchanging", arguments: [
@@ -336,15 +343,57 @@ struct AgyOAuthTests {
         #expect(AgyOAuth.projectId(refreshed) == nil)
         #expect(refreshed.extras["email"] == .string("u@example.com"))
 
-        let slowClient = SlowProjectLookupHTTPClient(initialResponses: [
+        let slowClient = HandleOnlyCancellingHTTPClient(initialResponses: [
             .response(status: 200, body: #"{"access_token":"ya29.timeout","expires_in":3600}"#),
         ])
+        let start = Date()
         let timedOut = try await AgyOAuthProvider(
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
             projectLookupTimeoutSeconds: 0.05
         ).refresh(stale, using: slowClient)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 2.0)
         #expect(timedOut.access == "ya29.timeout")
         #expect(AgyOAuth.projectId(timedOut) == nil)
+        #expect(slowClient.hungTimeoutSeconds == 0.05)
+        #expect(slowClient.hungHadCancellationHandle == true)
+        #expect(slowClient.cancelReasons == ["timeout"])
+    }
+
+    @Test("bestEffortProjectId passes default 10s timeoutSeconds and propagates parent Task cancellation to CancellationHandle")
+    func bestEffortProjectIdDefaultTimeoutAndParentCancellation() async throws {
+        let stale = OAuthCredentials(access: "old", refresh: "1//old", expires: 0)
+
+        // 1. Default 10s timeoutSeconds is forwarded on the HTTP request.
+        let timeoutRecorder = HandleOnlyCancellingHTTPClient(initialResponses: [
+            .response(status: 200, body: #"{"access_token":"ya29.fresh","expires_in":3600}"#),
+            .response(status: 200, body: #"{"cloudaicompanionProject":"proj-10s"}"#),
+        ])
+        let ok = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: timeoutRecorder)
+        #expect(AgyOAuth.projectId(ok) == "proj-10s")
+        #expect(timeoutRecorder.recordedTimeouts.count == 2)
+        #expect(timeoutRecorder.recordedTimeouts[1] == AgyOAuth.projectLookupTimeoutSeconds)
+        #expect(timeoutRecorder.recordedTimeouts[1] == 10)
+
+        // 2. Parent Task cancellation triggers CancellationHandle.cancel() immediately even with a 10s timeout.
+        let hungClient = HandleOnlyCancellingHTTPClient(initialResponses: [
+            .response(status: 200, body: #"{"access_token":"ya29.hung","expires_in":3600}"#),
+        ])
+        let start = Date()
+        let task = Task {
+            try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: hungClient)
+        }
+        await hungClient.waitUntilHung()
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 2.0)
+        #expect(hungClient.hungTimeoutSeconds == 10)
+        #expect(hungClient.hungHadCancellationHandle == true)
+        #expect(hungClient.cancelReasons == ["cancelled"])
     }
 
     @Test("AgyOAuthProvider.refresh classifies invalid_grant as rejected and 429/500/transport as unavailable")
@@ -415,13 +464,33 @@ struct AgyOAuthTests {
     }
 }
 
-/// Serves queued initial responses, then hangs on subsequent requests until cancelled.
-private final class SlowProjectLookupHTTPClient: HTTPClient, @unchecked Sendable {
+/// Serves queued initial responses, then hangs on subsequent requests while
+/// explicitly ignoring Swift Task cancellation — unblocking ONLY when
+/// `CancellationHandle.cancel()` fires (mirroring `URLSessionHTTPClient`'s
+/// `awaitHeader` behavior).
+final class HandleOnlyCancellingHTTPClient: HTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private var responses: [QueuedHTTPClient.Answer]
+    private(set) var recordedTimeouts: [TimeInterval?] = []
+    private(set) var hungTimeoutSeconds: TimeInterval?
+    private(set) var hungHadCancellationHandle = false
+    private(set) var cancelReasons: [String?] = []
+    private var hung = false
+    private var hungWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(initialResponses: [QueuedHTTPClient.Answer]) {
         self.responses = initialResponses
+    }
+
+    func waitUntilHung() async {
+        await withCheckedContinuation { cont in
+            let alreadyHung: Bool = lock.withLock {
+                if hung { return true }
+                hungWaiters.append(cont)
+                return false
+            }
+            if alreadyHung { cont.resume() }
+        }
     }
 
     func stream(
@@ -431,30 +500,72 @@ private final class SlowProjectLookupHTTPClient: HTTPClient, @unchecked Sendable
         body: Data?,
         cancellation: CancellationHandle?
     ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        try await run(url: url, cancellation: cancellation, timeoutSeconds: nil)
+    }
+
+    func stream(
+        url: URL,
+        method: String,
+        headers: [String: String],
+        body: Data?,
+        cancellation: CancellationHandle?,
+        timeoutSeconds: TimeInterval
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        try await run(url: url, cancellation: cancellation, timeoutSeconds: timeoutSeconds)
+    }
+
+    private func run(
+        url: URL,
+        cancellation: CancellationHandle?,
+        timeoutSeconds: TimeInterval?
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
         let next: QueuedHTTPClient.Answer? = lock.withLock {
-            responses.isEmpty ? nil : responses.removeFirst()
+            recordedTimeouts.append(timeoutSeconds)
+            return responses.isEmpty ? nil : responses.removeFirst()
         }
-        guard let next else {
-            try await Task.sleep(nanoseconds: 10_000_000_000)
-            throw URLError(.timedOut)
+        if let next {
+            switch next {
+            case .failure(let error):
+                throw error
+            case .response(let status, let body, let extra):
+                var fields = ["content-type": "application/json"]
+                for (k, v) in extra { fields[k] = v }
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: status,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: fields
+                )!
+                let data = Data(body.utf8)
+                return (response, AsyncThrowingStream { continuation in
+                    continuation.yield(data)
+                    continuation.finish()
+                })
+            }
         }
-        switch next {
-        case .failure(let error):
-            throw error
-        case .response(let status, let body, let extra):
-            var fields = ["content-type": "application/json"]
-            for (k, v) in extra { fields[k] = v }
-            let response = HTTPURLResponse(
-                url: url,
-                statusCode: status,
-                httpVersion: "HTTP/1.1",
-                headerFields: fields
-            )!
-            let data = Data(body.utf8)
-            return (response, AsyncThrowingStream { continuation in
-                continuation.yield(data)
-                continuation.finish()
-            })
+
+        // Hang until CancellationHandle fires — intentionally ignores Task cancellation.
+        return try await withCheckedThrowingContinuation { cont in
+            let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+                hungTimeoutSeconds = timeoutSeconds
+                hungHadCancellationHandle = cancellation != nil
+                hung = true
+                let w = hungWaiters
+                hungWaiters.removeAll()
+                return w
+            }
+            for waiter in waiters { waiter.resume() }
+
+            guard let cancellation else {
+                // If no CancellationHandle was supplied, fail fast so a regression
+                // surfaces as a clear assertion failure instead of hanging CI forever.
+                cont.resume(throwing: URLError(.cannotConnectToHost))
+                return
+            }
+            _ = cancellation.onCancel { [weak self] reason in
+                self?.lock.withLock { self?.cancelReasons.append(reason) }
+                cont.resume(throwing: URLError(.cancelled))
+            }
         }
     }
 }

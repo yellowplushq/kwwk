@@ -363,15 +363,28 @@ public extension HTTPClient {
         method: String,
         headers: [String: String],
         body: Data?,
-        cancellation: CancellationHandle? = nil
+        cancellation: CancellationHandle? = nil,
+        timeoutSeconds: TimeInterval? = nil
     ) async throws -> (HTTPURLResponse, Data) {
-        let (response, stream) = try await self.stream(
-            url: url,
-            method: method,
-            headers: headers,
-            body: body,
-            cancellation: cancellation
-        )
+        let (response, stream): (HTTPURLResponse, AsyncThrowingStream<Data, Error>)
+        if let timeoutSeconds {
+            (response, stream) = try await self.stream(
+                url: url,
+                method: method,
+                headers: headers,
+                body: body,
+                cancellation: cancellation,
+                timeoutSeconds: timeoutSeconds
+            )
+        } else {
+            (response, stream) = try await self.stream(
+                url: url,
+                method: method,
+                headers: headers,
+                body: body,
+                cancellation: cancellation
+            )
+        }
         var buffer = Data()
         for try await chunk in stream { buffer.append(chunk) }
         return (response, buffer)

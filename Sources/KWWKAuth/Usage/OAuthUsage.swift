@@ -118,15 +118,27 @@ public enum OAuthUsage {
         method: String = "GET",
         body requestBody: Data? = nil,
         provider: String,
+        cancellation: CancellationHandle? = nil,
+        timeoutSeconds: TimeInterval? = nil,
         client: HTTPClient
     ) async throws -> (HTTPURLResponse, Data) {
         let response: HTTPURLResponse
         let body: Data
         do {
-            (response, body) = try await client.request(url: url, method: method, headers: headers, body: requestBody)
+            (response, body) = try await client.request(
+                url: url,
+                method: method,
+                headers: headers,
+                body: requestBody,
+                cancellation: cancellation,
+                timeoutSeconds: timeoutSeconds
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if cancellation?.isCancelled == true {
+                throw CancellationError()
+            }
             throw OAuthUsageError.unavailable(providerId: provider, status: nil, detail: error.localizedDescription)
         }
         if response.statusCode == 429 {
