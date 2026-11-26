@@ -22,13 +22,25 @@ extension MCPOAuth {
               let host = normalizedHost(of: url), url.user == nil, url.password == nil
         else { return false }
         guard let serverURL else { return true }
-        if isLoopbackHost(host) { return isLoopback(serverURL) }
+        if isLoopbackHost(host) {
+            return isStrictLoopbackHost(host) && isStrictLoopback(serverURL)
+        }
         return scheme == "https" || MCPAuthHTTP.isSameOrigin(url, serverURL)
     }
 
-    /// Whether `url`'s host is this machine (`isLoopbackHost`).
+    /// Whether `url`'s host can reach this machine (`isLoopbackHost`),
+    /// including unspecified addresses (`0.0.0.0/8`, `::`) that resolvers
+    /// may route locally. Used as the broad denylist check.
     static func isLoopback(_ url: URL) -> Bool {
         normalizedHost(of: url).map(isLoopbackHost) ?? false
+    }
+
+    /// Whether `url`'s host is strictly a loopback address
+    /// (`isStrictLoopbackHost`), excluding unspecified addresses like
+    /// `0.0.0.0` or `::`. Used for allowlist exemptions (plain HTTP token
+    /// endpoints, local dev server endpoints, native redirect URIs).
+    static func isStrictLoopback(_ url: URL) -> Bool {
+        normalizedHost(of: url).map(isStrictLoopbackHost) ?? false
     }
 
     /// `url`'s host as the resolver reads it: lowercased, without IPv6
@@ -54,7 +66,28 @@ extension MCPOAuth {
         "ip6-localhost", "ip6-loopback",
     ]
 
-    /// Whether a host from `normalizedHost(of:)` is this machine: a
+    /// Whether a host from `normalizedHost(of:)` is strictly a loopback
+    /// target: a `localhost` name, `127.0.0.0/8`, `::1`, or IPv4-mapped /
+    /// IPv4-compatible `127.0.0.0/8`. Unspecified addresses (`0.0.0.0/8`,
+    /// `::`, `::2`, etc.) return false.
+    static func isStrictLoopbackHost(_ host: String) -> Bool {
+        if loopbackNames.contains(host) || host.hasSuffix(".localhost") { return true }
+        var v4 = in_addr()
+        if inet_aton(host, &v4) != 0 {
+            return withUnsafeBytes(of: &v4) { $0[0] == 127 }
+        }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, host, &v6) == 1 else { return false }
+        return withUnsafeBytes(of: &v6) { bytes in
+            if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true }
+            guard bytes[0..<10].allSatisfy({ $0 == 0 }),
+                  (bytes[10] == 0 && bytes[11] == 0) || (bytes[10] == 0xFF && bytes[11] == 0xFF)
+            else { return false }
+            return bytes[12] == 127
+        }
+    }
+
+    /// Whether a host from `normalizedHost(of:)` can reach this machine: a
     /// `localhost` name, or an address in 127.0.0.0/8 or 0.0.0.0/8, `::`,
     /// `::1`, or one of those in an IPv6 form (IPv4-mapped or -compatible).
     /// Addresses are read as the system resolver reads them, so `127.1`,

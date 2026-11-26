@@ -149,11 +149,12 @@ extension MCPOAuth {
         return hasSecret ? "client_secret_post" : "none"
     }
 
-    /// Refuse non-TLS token endpoints, except plain HTTP to a loopback host
-    /// (`isLoopback`), and any URL `isAllowedEndpoint` refuses.
+    /// Refuse non-TLS token endpoints, except plain HTTP to a strict
+    /// loopback host (`isStrictLoopback`), and any URL `isAllowedEndpoint`
+    /// refuses.
     public static func assertSecureTokenEndpoint(_ url: URL) throws {
         let scheme = url.scheme?.lowercased()
-        let secure = scheme == "https" || (scheme == "http" && isLoopback(url))
+        let secure = scheme == "https" || (scheme == "http" && isStrictLoopback(url))
         if !secure || !isAllowedEndpoint(url, serverURL: nil) {
             throw MCPAuthError.insecureTokenEndpoint(url.absoluteString)
         }

@@ -57,7 +57,7 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
     /// `URLSessionHTTPClient.shared`, that follows a redirect only within
     /// the server's origin. A server cannot send its requests, with their
     /// session id, configured headers and messages, on to another host.
-    static let defaultHTTPClient = URLSessionHTTPClient(redirects: .sameOrigin)
+    public static let defaultHTTPClient = URLSessionHTTPClient(redirects: .sameOrigin)
 
     /// - Parameters:
     ///   - headers: Extra request headers. A token from `auth` replaces any
@@ -241,7 +241,10 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
     ) async throws {
         let challenge = MCPAuthChallenge(header: response.value(forHTTPHeaderField: "WWW-Authenticate"))
         state.withLockedValue { state in
-            if let metadataURL = challenge.resourceMetadataURL { state.resourceMetadataURL = metadataURL }
+            if let metadataURL = challenge.resourceMetadataURL,
+               MCPOAuth.isAllowedEndpoint(metadataURL, serverURL: url) {
+                state.resourceMetadataURL = metadataURL
+            }
             state.scope = MCPOAuth.scopeUnion(state.scope, challenge.scope)
         }
         guard let authProvider else {
@@ -268,7 +271,10 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
         }
         let tokens = try await provider.tokens(nil)
         let (union, metadataURL): (String?, URL?) = state.withLockedValue { state in
-            if let metadataURL = challenge.resourceMetadataURL { state.resourceMetadataURL = metadataURL }
+            if let metadataURL = challenge.resourceMetadataURL,
+               MCPOAuth.isAllowedEndpoint(metadataURL, serverURL: url) {
+                state.resourceMetadataURL = metadataURL
+            }
             state.scope = MCPOAuth.scopeUnion(state.scope, tokens?.scope, challenge.scope)
             return (state.scope, state.resourceMetadataURL)
         }

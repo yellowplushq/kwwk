@@ -19,7 +19,7 @@ extension MCPOAuth {
         for raw in redirectURIs {
             guard let url = URL(string: raw), let scheme = url.scheme?.lowercased() else { continue }
             if scheme != "http" && scheme != "https" { return "native" }
-            if isLoopback(url) { return "native" }
+            if isStrictLoopback(url) { return "native" }
         }
         return "web"
     }

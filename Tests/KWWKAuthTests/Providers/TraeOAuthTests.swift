@@ -515,11 +515,34 @@ struct TraeRenewalTests {
         }
     }
 
+    @Test("A stored gate of the other build gets no request and ends the login")
+    func crossBuildGate() async {
+        let cases: [(TraeSite, String)] = [
+            (.china, "https://grow-normal.trae.ai"),
+            (.china, "https://grow-normal.traeapi.us"),
+            (.china, "https://api.marscode.com"),
+            (.international, "https://api.trae.cn"),
+        ]
+        for (site, gate) in cases {
+            var credentials = stored
+            credentials.extras["oauthHost"] = .string(gate)
+            let client = QueuedHTTPClient([ok(#"{"Result":{"Token":"jwt-new"}}"#)])
+            do {
+                _ = try await TraeOAuthProvider(site: site).refresh(credentials, using: client)
+                Issue.record("\(site.id) renewed at \(gate)")
+            } catch {
+                #expect((error as? OAuthRefreshError)?.kind == .rejected, "\(site.id) -> \(gate)")
+                #expect((error as? OAuthRefreshError)?.status == nil, "\(site.id) -> \(gate)")
+            }
+            #expect(client.requestCount == 0, "\(site.id) -> \(gate)")
+        }
+    }
+
     @Test("A refresh token the gate no longer takes ends the login; any other refusal may pass")
     func refusals() async {
         func kind(_ answer: QueuedHTTPClient.Answer) async -> OAuthRefreshError.Kind? {
             do {
-                _ = try await TraeOAuthProvider(site: .china).refresh(stored, using: QueuedHTTPClient([answer]))
+                _ = try await TraeOAuthProvider(site: .international).refresh(stored, using: QueuedHTTPClient([answer]))
                 return nil
             } catch {
                 return (error as? OAuthRefreshError)?.kind

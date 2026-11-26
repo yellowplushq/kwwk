@@ -21,6 +21,7 @@ struct RedirectPolicyTests {
         #expect(!follows("http://127.0.0.1:8080/a", "http://127.0.0.1:9090/b"))
         #expect(!follows("https://mcp.example.com/mcp", "https://user:pw@mcp.example.com/mcp"))
         #expect(!follows("https://mcp.example.com/mcp", "file:///etc/passwd"))
+        #expect(!follows("https:///a", "https:///b"))
     }
 
     @Test("the default follows every redirect, as before")

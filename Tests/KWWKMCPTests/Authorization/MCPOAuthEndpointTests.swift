@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import KWWKAI
 @testable import KWWKMCP
@@ -277,10 +280,22 @@ struct MCPOAuthEndpointTests {
                 try start("https://\(host):8443/authorize", serverURL: remote)
             }
         }
-        // Without the server's URL, plain HTTP is still fine for loopback.
+        // Without the server's URL, plain HTTP is still fine for strict loopback.
         for token in ["http://127.1:8080/token", "http://[::1]:8080/token", "http://localhost.:8080/token"] {
             let url = try #require(URL(string: token))
             #expect(throws: Never.self, "\(token)") { try MCPOAuth.assertSecureTokenEndpoint(url) }
+        }
+        // Unspecified addresses are blocked for remote servers (above) and do
+        // not qualify for the plain-HTTP loopback allowlist either.
+        let local = URL(string: "http://localhost:3000/mcp")!
+        for unspecified in ["0.0.0.0", "0", "0.1.2.3", "[::]", "[::2]", "[::ffff:0.0.0.0]"] {
+            let httpToken = try #require(URL(string: "http://\(unspecified):8080/token"), "\(unspecified)")
+            #expect(!MCPOAuth.isStrictLoopback(httpToken), "\(unspecified)")
+            #expect(throws: MCPAuthError.insecureTokenEndpoint(httpToken.absoluteString), "\(unspecified)") {
+                try MCPOAuth.assertSecureTokenEndpoint(httpToken)
+            }
+            #expect(!MCPOAuth.isAllowedEndpoint(httpToken, serverURL: local), "\(unspecified)")
+            #expect(MCPOAuth.applicationType(for: ["http://\(unspecified):8080/cb"]) == "web", "\(unspecified)")
         }
     }
 
@@ -458,5 +473,70 @@ struct MCPOAuthEndpointTests {
         let fallback = try await MCPOAuth.discoverServerInfo(serverURL: lan, httpClient: legacy)
         #expect(fallback.authorizationServerURL == "http://192.168.1.5:8000/")
         #expect(legacy.requests.contains { $0.url.path == "/.well-known/oauth-authorization-server" })
+    }
+
+    @Test("a disallowed resource metadata hint in a later challenge does not overwrite a valid one")
+    func transportKeepsValidResourceMetadataHint() async throws {
+        final class ChallengingServer: HTTPClient, @unchecked Sendable {
+            private let lock = NSLock()
+            private var calls = 0
+
+            func stream(
+                url: URL,
+                method: String,
+                headers: [String: String],
+                body: Data?,
+                cancellation: CancellationHandle?
+            ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+                let n = lock.withLock { calls += 1; return calls }
+                let (status, authHeader): (Int, String) = switch n {
+                case 1:
+                    (401, #"Bearer resource_metadata="https://resource.example.com/prm", scope="read""#)
+                default:
+                    (403, #"Bearer error="insufficient_scope", resource_metadata="http://127.0.0.1:8080/prm", scope="write""#)
+                }
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: status,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["WWW-Authenticate": authHeader]
+                )!
+                let stream = AsyncThrowingStream<Data, Error> { $0.finish() }
+                return (response, stream)
+            }
+        }
+
+        let authServer = RoutedAuthServer()
+        authServer.routes["GET https://resource.example.com/prm"] = (200, [
+            "resource": "https://mcp.example.com/mcp",
+            "authorization_servers": ["https://auth.example.com"],
+        ])
+        authServer.publishAuthorizationServer("https://auth.example.com")
+
+        let provider = MemoryOAuthProvider()
+        provider.client = MCPOAuthClientInformation(clientID: "client-1", issuer: "https://auth.example.com")
+        provider.storedTokens = MCPOAuthTokens(
+            accessToken: "old",
+            refreshToken: "r1",
+            scope: "read",
+            issuer: "https://auth.example.com"
+        )
+
+        let transport = MCPStreamableHTTPTransport(
+            url: remote,
+            httpClient: ChallengingServer(),
+            auth: .oauth(provider, interactive: true),
+            authHTTPClient: authServer
+        )
+        _ = try await transport.start()
+        let message = JSONRPCMessage.request(id: .int(1), method: "tools/call", params: nil)
+        await #expect(throws: MCPAuthError.self) {
+            try await transport.send(message)
+        }
+        await transport.close()
+
+        #expect(authServer.contacted(host: "resource.example.com"))
+        #expect(!authServer.contacted(host: "127.0.0.1"))
+        #expect(provider.discovery?.resourceMetadataURL == "https://resource.example.com/prm")
     }
 }

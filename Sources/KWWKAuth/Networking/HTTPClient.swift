@@ -63,7 +63,8 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
         func follows(from: URL, to: URL) -> Bool {
             guard self == .sameOrigin else { return true }
             guard to.user == nil, to.password == nil,
-                  let fromHost = from.host?.lowercased(), let toHost = to.host?.lowercased(), fromHost == toHost,
+                  let fromHost = from.host?.lowercased(), !fromHost.isEmpty,
+                  let toHost = to.host?.lowercased(), fromHost == toHost,
                   let fromScheme = from.scheme?.lowercased(), let toScheme = to.scheme?.lowercased()
             else { return false }
             func port(_ url: URL, _ scheme: String) -> Int? {
@@ -86,12 +87,13 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
     public let session: URLSession
     private let delegate: StreamingSessionDelegate
 
-    /// One client that lives as long as the process, for callers that come
-    /// and go (an MCP transport per connection attempt). Releasing a
-    /// `URLSession` while other sessions have requests in flight aborts the
-    /// process on swift-corelibs-foundation ("_MultiHandle deallocated with
-    /// non-zero retain count"), so such callers share this one instead of
-    /// making and dropping their own.
+    /// One client that lives as long as the process, for short-lived callers
+    /// that follow redirects by default (MCP transports use their own
+    /// same-origin singleton). Releasing a `URLSession` while other sessions
+    /// have requests in flight aborts the process on
+    /// swift-corelibs-foundation ("_MultiHandle deallocated with non-zero
+    /// retain count"), so such callers share a process-lifetime instance
+    /// instead of making and dropping their own.
     public static let shared = URLSessionHTTPClient()
 
     public init(session: URLSession? = nil, redirects: RedirectPolicy = .follow) {

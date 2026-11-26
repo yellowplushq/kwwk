@@ -177,11 +177,10 @@ public enum TraeOAuth {
 
     /// The renewal's `ExchangeToken` for a login that recorded `recorded` as
     /// its account gate (nil or empty: none, so the site's own). The gate
-    /// must be one a sign-in can record: an exchange origin of either build,
-    /// or the site's account gate. A gate of the other build answers 20101,
-    /// which ends the login as it always has. Anything else is nil: the
-    /// renewal then sends nothing, since the stored login names a host that
-    /// is not Trae's.
+    /// must belong to this site: its `accountGateway` or one of its build's
+    /// exchange origins. Anything else — including the other build's gates —
+    /// is nil, so the renewal sends nothing rather than sending one build's
+    /// refresh token to another host.
     static func renewalURL(recorded: String?, site: TraeSite) -> URL? {
         let wanted = (recorded ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return URL(string: site.accountGateway + renewalExchangePath) }
@@ -189,7 +188,7 @@ public enum TraeOAuth {
             let lowered = origin.lowercased()
             return lowered.hasSuffix("/") ? String(lowered.dropLast()) : lowered
         }
-        let gates = [site.accountGateway] + Profile.china.exchangeOrigins + Profile.international.exchangeOrigins
+        let gates = [site.accountGateway] + Profile.of(site).exchangeOrigins
         guard let gate = gates.first(where: { key($0) == key(wanted) }) else { return nil }
         return URL(string: gate + renewalExchangePath)
     }
