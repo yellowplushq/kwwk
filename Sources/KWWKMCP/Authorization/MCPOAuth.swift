@@ -123,9 +123,13 @@ public enum MCPOAuth {
         let discoveryStore = provider as? any MCPOAuthDiscoveryStore
         let cached = try await discoveryStore?.discoveryState()
 
-        var resourceMetadataURL = options.resourceMetadataURL
+        // A hint `isAllowedEndpoint` refuses is neither read nor saved.
+        func allowedHint(_ url: URL?) -> URL? {
+            url.flatMap { isAllowedEndpoint($0, serverURL: options.serverURL) ? $0 : nil }
+        }
+        var resourceMetadataURL = allowedHint(options.resourceMetadataURL)
         if resourceMetadataURL == nil, let saved = cached?.resourceMetadataURL {
-            resourceMetadataURL = URL(string: saved)
+            resourceMetadataURL = allowedHint(URL(string: saved))
         }
 
         let authorizationServerURL: String

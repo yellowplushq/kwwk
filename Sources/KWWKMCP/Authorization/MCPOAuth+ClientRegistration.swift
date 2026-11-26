@@ -19,38 +19,13 @@ extension MCPOAuth {
         for raw in redirectURIs {
             guard let url = URL(string: raw), let scheme = url.scheme?.lowercased() else { continue }
             if scheme != "http" && scheme != "https" { return "native" }
-            if isLoopbackHost(url.host) { return "native" }
+            if isLoopback(url) { return "native" }
         }
         return "web"
     }
 
-    static func isLoopbackHost(_ host: String?) -> Bool {
-        guard let host = host?.lowercased() else { return false }
-        return host == "localhost"
-            || host.hasSuffix(".localhost")
-            || host == "127.0.0.1"
-            || host == "::1"
-            || host == "[::1]"
-    }
-
     static func isHTTPSURLWithPath(_ url: URL) -> Bool {
         url.scheme?.lowercased() == "https" && !url.path.isEmpty && url.path != "/"
-    }
-
-    /// Whether the authorization flow may send a request, or the user
-    /// agent, to `url`. It must be an `http` or `https` URL with a host and
-    /// no credentials in it. With the MCP server's URL known, a loopback
-    /// host is only for a server on loopback itself, and plain HTTP to any
-    /// other host only for the server's own origin: what a server's metadata
-    /// names cannot point the client at this machine or at a plain-HTTP
-    /// service elsewhere.
-    static func isAllowedEndpoint(_ url: URL, serverURL: URL?) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
-              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil
-        else { return false }
-        guard let serverURL else { return true }
-        if isLoopbackHost(host) { return isLoopbackHost(serverURL.host) }
-        return scheme == "https" || MCPAuthHTTP.isSameOrigin(url, serverURL)
     }
 
     /// RFC 7591 dynamic client registration. With `serverURL`, the MCP

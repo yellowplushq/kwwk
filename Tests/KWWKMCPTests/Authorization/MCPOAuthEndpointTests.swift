@@ -258,6 +258,186 @@ struct MCPOAuthEndpointTests {
         #expect(provider.storedTokens?.accessToken == "access-1")
     }
 
+    /// Other spellings of this machine that the resolver, or the system's
+    /// URL loading, reads as loopback.
+    static let loopbackSpellings = [
+        "localhost.", "LOCALHOST", "localhost..", "dev.localhost.", "localhost.localdomain", "ip6-localhost",
+        "127.1", "127.0.0.2", "127.255.255.254", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "0x7f000001",
+        "0.0.0.0", "0", "[::1]", "[0:0:0:0:0:0:0:1]", "[::]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]",
+        "[::127.0.0.1]", "[::ffff:0.0.0.0]",
+    ]
+
+    @Test("every spelling of loopback is loopback for a remote server, over HTTPS too")
+    func loopbackSpellings() throws {
+        for host in Self.loopbackSpellings {
+            let url = try #require(URL(string: "https://\(host):8443/x"), "\(host)")
+            #expect(MCPOAuth.isLoopback(url), "\(host)")
+            #expect(!MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(host)")
+            #expect(throws: MCPAuthError.self, "\(host)") {
+                try start("https://\(host):8443/authorize", serverURL: remote)
+            }
+        }
+        // Without the server's URL, plain HTTP is still fine for loopback.
+        for token in ["http://127.1:8080/token", "http://[::1]:8080/token", "http://localhost.:8080/token"] {
+            let url = try #require(URL(string: token))
+            #expect(throws: Never.self, "\(token)") { try MCPOAuth.assertSecureTokenEndpoint(url) }
+        }
+    }
+
+    @Test("hosts elsewhere are not loopback")
+    func notLoopback() throws {
+        for host in [
+            "example.com", "localhost.example.com", "notlocalhost", "localhostx", "127.0.0.1.example.com",
+            "128.0.0.1", "10.0.0.1", "1.0.0.127", "169.254.169.254", "[100::1]", "[fe80::1]",
+            "[::ffff:8.8.8.8]", "[2001:db8::1]", "[64:ff9b::127.0.0.1]",
+        ] {
+            let url = try #require(URL(string: "https://\(host)/x"), "\(host)")
+            #expect(!MCPOAuth.isLoopback(url), "\(host)")
+        }
+        for host in ["localhost.example.com", "127.0.0.1.example.com", "auth.example.com."] {
+            let url = try #require(URL(string: "https://\(host)/x"), "\(host)")
+            #expect(MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(host)")
+        }
+    }
+
+    @Test("a host written with % (percent-encoding, an IPv6 zone) is refused")
+    func percentInHost() throws {
+        for page in [
+            "https://127%2E0%2E0%2E1/authorize",
+            "https://%6Cocalhost/authorize",
+            "https://auth%2Eexample.com/authorize",
+            "https://[fe80::1%25en0]/authorize",
+        ] {
+            guard let url = URL(string: page) else { continue }
+            #expect(!MCPOAuth.isAllowedEndpoint(url, serverURL: nil), "\(page)")
+            #expect(!MCPOAuth.isAllowedEndpoint(url, serverURL: remote), "\(page)")
+            #expect(throws: MCPAuthError.self, "\(page)") { try MCPOAuth.assertSecureTokenEndpoint(url) }
+        }
+    }
+
+    @Test("metadata naming loopback by another spelling is not contacted")
+    func loopbackSpellingsInMetadata() async throws {
+        let server = RoutedAuthServer()
+        server.publishResource("https://mcp.example.com", authorizationServer: "https://auth.example.com")
+        server.publishAuthorizationServer("https://auth.example.com")
+        for hint in ["https://localhost.:8443/prm", "https://[::ffff:127.0.0.1]:8443/prm", "https://2130706433/prm"] {
+            let info = try await MCPOAuth.discoverServerInfo(
+                serverURL: remote,
+                resourceMetadataURL: URL(string: hint),
+                httpClient: server
+            )
+            #expect(info.authorizationServerURL == "https://auth.example.com", "\(hint)")
+        }
+        #expect(server.requests.allSatisfy { $0.url.host?.hasSuffix("example.com") == true })
+
+        for authorizationServer in ["https://127.1:8443", "https://[0:0:0:0:0:0:0:1]:9443"] {
+            let other = RoutedAuthServer()
+            other.publishResource("https://mcp.example.com", authorizationServer: authorizationServer)
+            let refusal = MCPAuthError.incompatibleServer("invalid authorization server URL \(authorizationServer)")
+            await #expect(throws: refusal) {
+                _ = try await MCPOAuth.discoverServerInfo(serverURL: remote, httpClient: other)
+            }
+            #expect(other.requests.allSatisfy { $0.url.host == "mcp.example.com" }, "\(authorizationServer)")
+        }
+
+        let register = RoutedAuthServer()
+        register.publishResource("https://mcp.example.com", authorizationServer: "https://auth.example.com")
+        register.publishAuthorizationServer("https://auth.example.com", register: "https://localhost.:8443/register")
+        let refusal = MCPAuthError.incompatibleServer("invalid registration endpoint https://localhost.:8443/register")
+        await #expect(throws: refusal) {
+            _ = try await MCPOAuth.auth(
+                MemoryOAuthProvider(),
+                options: MCPOAuthOptions(serverURL: remote, httpClient: register)
+            )
+        }
+        #expect(register.requests.allSatisfy { $0.url.host?.hasSuffix("example.com") == true })
+    }
+
+    @Test("the code exchange refuses a token endpoint the server may not name")
+    func codeExchangeTokenEndpoint() async throws {
+        let server = RoutedAuthServer()
+        for token in ["https://localhost.:8443/token", "https://127.1/token", "http://auth.example.com/token"] {
+            await #expect(throws: MCPAuthError.insecureTokenEndpoint(token)) {
+                _ = try await MCPOAuth.exchangeAuthorization(
+                    authorizationServerURL: "https://auth.example.com",
+                    metadata: MCPAuthorizationServerMetadata(
+                        issuer: "https://auth.example.com",
+                        authorizationEndpoint: "https://auth.example.com/authorize",
+                        tokenEndpoint: token
+                    ),
+                    client: client,
+                    code: "code-1",
+                    codeVerifier: "verifier",
+                    redirectURI: redirect,
+                    resource: nil,
+                    httpClient: server,
+                    serverURL: remote
+                )
+            }
+        }
+        #expect(server.requests.isEmpty)
+    }
+
+    @Test("without metadata, an authorization server on loopback is refused for a remote server")
+    func legacyAuthorizationEndpoint() throws {
+        for authorizationServer in ["https://127.1:8443", "https://localhost.", "http://auth.example.com"] {
+            #expect(throws: MCPAuthError.self, "\(authorizationServer)") {
+                try MCPOAuth.startAuthorization(
+                    authorizationServerURL: authorizationServer,
+                    metadata: nil,
+                    client: client,
+                    redirectURI: redirect,
+                    scope: nil,
+                    state: "state-1",
+                    resource: nil,
+                    serverURL: remote
+                )
+            }
+        }
+    }
+
+    @Test("a refused resource metadata hint is not saved with the discovery state")
+    func refusedHintNotSaved() async throws {
+        let server = RoutedAuthServer()
+        server.publishResource("https://mcp.example.com", authorizationServer: "https://auth.example.com")
+        server.publishAuthorizationServer("https://auth.example.com")
+        let provider = MemoryOAuthProvider()
+        _ = try await MCPOAuth.auth(provider, options: MCPOAuthOptions(
+            serverURL: remote,
+            resourceMetadataURL: URL(string: "https://localhost.:8443/prm"),
+            httpClient: server
+        ))
+        let saved = try #require(provider.discovery)
+        #expect(saved.authorizationServerURL == "https://auth.example.com")
+        #expect(saved.resourceMetadataURL == nil)
+    }
+
+    @Test("a local development server on IPv6 loopback signs in end to end")
+    func ipv6LoopbackServer() async throws {
+        let local = URL(string: "http://[::1]:3000/mcp")!
+        let server = RoutedAuthServer()
+        server.publishResource("http://[::1]:3000", authorizationServer: "http://[::1]:3000")
+        server.publishAuthorizationServer("http://[::1]:3000")
+        let provider = MemoryOAuthProvider()
+        let result = try await MCPOAuth.auth(provider, options: MCPOAuthOptions(serverURL: local, httpClient: server))
+        #expect(result == .redirect)
+        let page = try #require(provider.redirects.first)
+        #expect(page.absoluteString.hasPrefix("http://[::1]:3000/authorize?"))
+        try await MCPOAuth.finishAuthorization(
+            provider,
+            serverURL: local,
+            callbackParameters: ["code": "code-1", "state": "state-1"],
+            httpClient: server
+        )
+        #expect(provider.storedTokens?.accessToken == "access-1")
+
+        // A loopback server by another spelling keeps its loopback endpoints.
+        let spelled = URL(string: "http://127.1:3000/mcp")!
+        #expect(try start("http://localhost:3000/authorize", serverURL: spelled).port == 3000)
+        #expect(try start("http://[::1]:3000/authorize", serverURL: spelled).port == 3000)
+        #expect(try start("http://127.0.0.1:3000/authorize", serverURL: local).port == 3000)
+    }
+
     @Test("a plain-HTTP server on the network still finds its HTTPS authorization server")
     func networkServer() async throws {
         let lan = URL(string: "http://192.168.1.5:8000/mcp")!

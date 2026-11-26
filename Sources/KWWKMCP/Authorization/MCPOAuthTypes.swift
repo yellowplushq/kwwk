@@ -429,7 +429,8 @@ public enum MCPAuthError: Error, LocalizedError, Sendable, Equatable {
     /// The callback leg resolved a different authorization server than the
     /// one the authorization request went to (SEP-2352).
     case authorizationServerMismatch(expected: String, actual: String)
-    /// Credentials would be sent to a non-TLS token endpoint.
+    /// Credentials would be sent to a token endpoint that is not HTTPS
+    /// (plain HTTP only to loopback) or that this MCP server may not name.
     case insecureTokenEndpoint(String)
     /// Dynamic client registration was refused.
     case registrationRejected(status: Int, body: String)
@@ -461,7 +462,8 @@ public enum MCPAuthError: Error, LocalizedError, Sendable, Equatable {
         case .authorizationServerMismatch(let expected, let actual):
             return "OAuth authorization server changed during the flow: expected \(expected), got \(actual)"
         case .insecureTokenEndpoint(let url):
-            return "Refusing to send credentials to non-TLS token endpoint \(url)"
+            return "Refusing to send credentials to token endpoint \(url): "
+                + "it is not HTTPS, or not allowed for this MCP server"
         case .registrationRejected(let status, let body):
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
             return "OAuth dynamic client registration rejected (HTTP \(status))"
