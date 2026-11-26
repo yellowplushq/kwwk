@@ -816,4 +816,41 @@ struct BedrockCacheAndAuthTests {
         #expect(rt1["signature"] as? String == "omitted-sig")
         #expect(content[2]["text"] as? String == "done")
     }
+
+    @Test("Bedrock supportsReasoningReplay: false drops prior assistant reasoning on replay")
+    func supportsReasoningReplayFalseDropsThinking() async throws {
+        let kimi = try #require(ModelsCatalog.model(provider: "amazon-bedrock", id: "global.moonshotai.kimi-k3.1"))
+        #expect(kimi.compat?.supportsReasoningReplay == false)
+
+        let turn = AssistantMessage(
+            content: [
+                .thinking(ThinkingContent(thinking: "I should read it.")),
+                .toolCall(ToolCall(id: "tool-1", name: "read", arguments: .object(["path": .string("a.txt")]))),
+            ],
+            api: kimi.api,
+            provider: kimi.provider,
+            model: kimi.id
+        )
+        let messages: [Message] = [
+            .user(UserMessage(text: "read a.txt")),
+            .assistant(turn),
+            .toolResult(ToolResultMessage(toolCallId: "tool-1", toolName: "read", content: [.text(TextContent(text: "ok"))], isError: false)),
+        ]
+
+        let client = ByteStubClient(body: Self.endFrames())
+        let provider = BedrockProvider(
+            client: client, region: "us-east-1", environment: [:], resolveProfileFiles: false,
+            credentialsProvider: { AWSSigV4.Credentials(accessKeyId: "k", secretAccessKey: "s") }
+        )
+        _ = await provider.stream(model: kimi, context: Context(messages: messages), options: nil).result()
+
+        let data = try #require(client.lastRequest?.body)
+        let body = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let encoded = try #require(body["messages"] as? [[String: Any]])
+        let asst = try #require(encoded.first { ($0["role"] as? String) == "assistant" })
+        let content = try #require(asst["content"] as? [[String: Any]])
+        #expect(content.count == 1)
+        #expect(content[0]["reasoningContent"] == nil)
+        #expect(content[0]["toolUse"] != nil)
+    }
 }

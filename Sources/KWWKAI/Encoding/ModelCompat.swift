@@ -50,6 +50,13 @@ public struct ModelCompat: Codable, Sendable, Hashable {
     public var forceAdaptiveThinking: Bool?
     public var allowEmptySignature: Bool?
 
+    // MARK: bedrock-converse-stream
+    /// Whether earlier assistant reasoning blocks may be replayed on Bedrock
+    /// Converse. `false` omits prior reasoning blocks (e.g. Bedrock Kimi K3
+    /// and K3.1, which fail with `InternalServerException` if reasoning is
+    /// replayed). nil ⇒ true.
+    public var supportsReasoningReplay: Bool?
+
     // MARK: mid-conversation tool changes
     /// The model accepts system-role messages after the conversation started.
     public var supportsMidConvoSystemMessages: Bool?

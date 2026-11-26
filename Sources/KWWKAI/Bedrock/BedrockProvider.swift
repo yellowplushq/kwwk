@@ -560,6 +560,7 @@ public final class BedrockProvider: APIProvider, @unchecked Sendable {
                     case .text(let t):
                         if let text = nonBlankText(t.text) { parts.append(text) }
                     case .thinking(let th):
+                        if model.compat?.supportsReasoningReplay == false { break }
                         if th.redacted == true {
                             if let data = th.thinkingSignature, !data.isEmpty {
                                 parts.append(["reasoningContent": ["redactedContent": data]])
