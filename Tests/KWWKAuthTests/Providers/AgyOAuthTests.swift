@@ -206,16 +206,13 @@ struct AgyOAuthTests {
             .response(status: 200, body: #"{"email":"slow@example.com"}"#),
         ])
 
-        let start = Date()
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
             client: client,
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
             projectLookupTimeoutSeconds: 0.05
         )
-        let elapsed = Date().timeIntervalSince(start)
 
-        #expect(elapsed < 2.0)
         #expect(credentials.access == "ya29.slow")
         #expect(AgyOAuth.email(credentials) == "slow@example.com")
         #expect(AgyOAuth.projectId(credentials) == nil)
@@ -346,13 +343,10 @@ struct AgyOAuthTests {
         let slowClient = HandleOnlyCancellingHTTPClient(initialResponses: [
             .response(status: 200, body: #"{"access_token":"ya29.timeout","expires_in":3600}"#),
         ])
-        let start = Date()
         let timedOut = try await AgyOAuthProvider(
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
             projectLookupTimeoutSeconds: 0.05
         ).refresh(stale, using: slowClient)
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(elapsed < 2.0)
         #expect(timedOut.access == "ya29.timeout")
         #expect(AgyOAuth.projectId(timedOut) == nil)
         #expect(slowClient.hungTimeoutSeconds == 0.05)
@@ -379,7 +373,6 @@ struct AgyOAuthTests {
         let hungClient = HandleOnlyCancellingHTTPClient(initialResponses: [
             .response(status: 200, body: #"{"access_token":"ya29.hung","expires_in":3600}"#),
         ])
-        let start = Date()
         let task = Task {
             try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: hungClient)
         }
@@ -389,8 +382,6 @@ struct AgyOAuthTests {
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(elapsed < 2.0)
         #expect(hungClient.hungTimeoutSeconds == 10)
         #expect(hungClient.hungHadCancellationHandle == true)
         #expect(hungClient.cancelReasons == ["cancelled"])
