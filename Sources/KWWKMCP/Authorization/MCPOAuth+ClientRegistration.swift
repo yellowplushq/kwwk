@@ -37,13 +37,31 @@ extension MCPOAuth {
         url.scheme?.lowercased() == "https" && !url.path.isEmpty && url.path != "/"
     }
 
-    /// RFC 7591 dynamic client registration.
+    /// Whether the authorization flow may send a request, or the user
+    /// agent, to `url`. It must be an `http` or `https` URL with a host and
+    /// no credentials in it. With the MCP server's URL known, a loopback
+    /// host is only for a server on loopback itself, and plain HTTP to any
+    /// other host only for the server's own origin: what a server's metadata
+    /// names cannot point the client at this machine or at a plain-HTTP
+    /// service elsewhere.
+    static func isAllowedEndpoint(_ url: URL, serverURL: URL?) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil
+        else { return false }
+        guard let serverURL else { return true }
+        if isLoopbackHost(host) { return isLoopbackHost(serverURL.host) }
+        return scheme == "https" || MCPAuthHTTP.isSameOrigin(url, serverURL)
+    }
+
+    /// RFC 7591 dynamic client registration. With `serverURL`, the MCP
+    /// server's, the endpoint is held to `isAllowedEndpoint`.
     public static func registerClient(
         authorizationServerURL: String,
         metadata: MCPAuthorizationServerMetadata?,
         clientMetadata: MCPOAuthClientMetadata,
         scope: String?,
-        httpClient: any MCPAuthHTTPClient
+        httpClient: any MCPAuthHTTPClient,
+        serverURL: URL? = nil
     ) async throws -> MCPOAuthClientInformation {
         let endpoint: URL
         if let metadata {
@@ -57,6 +75,9 @@ extension MCPOAuth {
             }
             endpoint = url
         }
+        guard isAllowedEndpoint(endpoint, serverURL: serverURL) else {
+            throw MCPAuthError.incompatibleServer("invalid registration endpoint \(endpoint.absoluteString)")
+        }
         var submitted = clientMetadata
         if let scope { submitted.scope = scope }
         let encoder = JSONEncoder()
@@ -68,7 +89,7 @@ extension MCPOAuth {
             body: try encoder.encode(submitted)
         ), using: httpClient)
         guard response.isSuccess else {
-            throw MCPAuthError.registrationRejected(status: response.status, body: response.text)
+            throw MCPAuthError.registrationRejected(status: response.status, body: String(response.text.prefix(500)))
         }
         do {
             var information = try JSONDecoder().decode(MCPOAuthClientInformation.self, from: response.body)

@@ -173,6 +173,27 @@ public enum TraeOAuth {
         }
     }
 
+    // MARK: The renewal's gate
+
+    /// The renewal's `ExchangeToken` for a login that recorded `recorded` as
+    /// its account gate (nil or empty: none, so the site's own). The gate
+    /// must be one a sign-in can record: an exchange origin of either build,
+    /// or the site's account gate. A gate of the other build answers 20101,
+    /// which ends the login as it always has. Anything else is nil: the
+    /// renewal then sends nothing, since the stored login names a host that
+    /// is not Trae's.
+    static func renewalURL(recorded: String?, site: TraeSite) -> URL? {
+        let wanted = (recorded ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { return URL(string: site.accountGateway + renewalExchangePath) }
+        func key(_ origin: String) -> String {
+            let lowered = origin.lowercased()
+            return lowered.hasSuffix("/") ? String(lowered.dropLast()) : lowered
+        }
+        let gates = [site.accountGateway] + Profile.china.exchangeOrigins + Profile.international.exchangeOrigins
+        guard let gate = gates.first(where: { key($0) == key(wanted) }) else { return nil }
+        return URL(string: gate + renewalExchangePath)
+    }
+
     // MARK: The sign-in page
 
     /// Where a build's sign-in page is: the host it publishes, or the one
@@ -464,7 +485,8 @@ public enum TraeOAuth {
     }
 
     /// `https://host[:port]` of an address a page or a gate named; nil when
-    /// it names no host.
+    /// it names no host, or a scheme other than a web page's, since the
+    /// address is opened in the browser.
     static func origin(of address: String) -> String? {
         var text = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -474,6 +496,7 @@ public enum TraeOAuth {
         guard let components = URLComponents(string: text), let host = components.host, !host.isEmpty
         else { return nil }
         let scheme = components.scheme?.lowercased() ?? "https"
+        guard scheme == "https" || scheme == "http" else { return nil }
         guard let port = components.port else { return "\(scheme)://\(host)" }
         return "\(scheme)://\(host):\(port)"
     }
@@ -610,7 +633,17 @@ public struct TraeOAuthProvider: OAuthProvider {
         _ credentials: OAuthCredentials,
         using client: HTTPClient
     ) async throws -> OAuthCredentials {
-        let gateway = GateEnvelope.string(credentials.extras[TraeOAuth.accountGatewayExtra]) ?? site.accountGateway
+        guard let url = TraeOAuth.renewalURL(
+            recorded: GateEnvelope.string(credentials.extras[TraeOAuth.accountGatewayExtra]),
+            site: site
+        ) else {
+            throw OAuthRefreshError(
+                providerId: id,
+                kind: .rejected,
+                status: nil,
+                detail: "the stored \(site.name) login names an account gate that is not \(site.name)'s; sign in again"
+            )
+        }
         let body = try JSONSerialization.data(
             withJSONObject: [
                 "ClientID": TraeOAuth.clientID,
@@ -622,7 +655,7 @@ public struct TraeOAuthProvider: OAuthProvider {
         )
         let (response, answer) = try await OAuthRefreshError.post(
             provider: id,
-            url: URL(string: gateway + TraeOAuth.renewalExchangePath)!,
+            url: url,
             headers: GateEnvelope.jsonHeaders,
             body: body,
             client: client

@@ -4,7 +4,9 @@ import KWWKAI
 extension MCPOAuth {
     // MARK: - Authorization request
 
-    /// Build the authorization URL with a fresh PKCE challenge.
+    /// Build the authorization URL with a fresh PKCE challenge. The user
+    /// agent is sent there, so only an `http` or `https` endpoint is taken;
+    /// with `serverURL`, the MCP server's, it is held to `isAllowedEndpoint`.
     public static func startAuthorization(
         authorizationServerURL: String,
         metadata: MCPAuthorizationServerMetadata?,
@@ -12,7 +14,8 @@ extension MCPOAuth {
         redirectURI: URL,
         scope: String?,
         state: String?,
-        resource: String?
+        resource: String?,
+        serverURL: URL? = nil
     ) throws -> (authorizationURL: URL, codeVerifier: String) {
         let endpoint: URL
         if let metadata {
@@ -33,6 +36,9 @@ extension MCPOAuth {
                 throw MCPAuthError.incompatibleServer("invalid authorization server URL \(authorizationServerURL)")
             }
             endpoint = url
+        }
+        guard isAllowedEndpoint(endpoint, serverURL: serverURL) else {
+            throw MCPAuthError.incompatibleServer("invalid authorization endpoint \(endpoint.absoluteString)")
         }
         let pkce = PKCE.random()
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
@@ -77,7 +83,8 @@ extension MCPOAuth {
         resource: String?,
         iss: String? = nil,
         validateIssuer: Bool = false,
-        httpClient: any MCPAuthHTTPClient
+        httpClient: any MCPAuthHTTPClient,
+        serverURL: URL? = nil
     ) async throws -> MCPOAuthTokens {
         if validateIssuer {
             try validateAuthorizationResponseIssuer(
@@ -97,7 +104,8 @@ extension MCPOAuth {
                 ("redirect_uri", redirectURI.absoluteString),
             ],
             resource: resource,
-            httpClient: httpClient
+            httpClient: httpClient,
+            serverURL: serverURL
         )
     }
 
@@ -108,7 +116,8 @@ extension MCPOAuth {
         client: MCPOAuthClientInformation,
         refreshToken: String,
         resource: String?,
-        httpClient: any MCPAuthHTTPClient
+        httpClient: any MCPAuthHTTPClient,
+        serverURL: URL? = nil
     ) async throws -> MCPOAuthTokens {
         var tokens = try await tokenRequest(
             authorizationServerURL: authorizationServerURL,
@@ -116,7 +125,8 @@ extension MCPOAuth {
             client: client,
             parameters: [("grant_type", "refresh_token"), ("refresh_token", refreshToken)],
             resource: resource,
-            httpClient: httpClient
+            httpClient: httpClient,
+            serverURL: serverURL
         )
         if tokens.refreshToken == nil { tokens.refreshToken = refreshToken }
         return tokens
@@ -139,9 +149,12 @@ extension MCPOAuth {
         return hasSecret ? "client_secret_post" : "none"
     }
 
-    /// Refuse non-TLS token endpoints, except loopback hosts.
+    /// Refuse non-TLS token endpoints, except plain HTTP to a loopback host,
+    /// and anything but an `http` or `https` URL.
     public static func assertSecureTokenEndpoint(_ url: URL) throws {
-        if url.scheme?.lowercased() != "https" && !isLoopbackHost(url.host) {
+        let scheme = url.scheme?.lowercased()
+        let secure = scheme == "https" || (scheme == "http" && isLoopbackHost(url.host))
+        if !secure || !isAllowedEndpoint(url, serverURL: nil) {
             throw MCPAuthError.insecureTokenEndpoint(url.absoluteString)
         }
     }
@@ -152,7 +165,8 @@ extension MCPOAuth {
         client: MCPOAuthClientInformation,
         parameters: [(String, String)],
         resource: String?,
-        httpClient: any MCPAuthHTTPClient
+        httpClient: any MCPAuthHTTPClient,
+        serverURL: URL?
     ) async throws -> MCPOAuthTokens {
         let endpoint: URL
         if let metadata, let url = URL(string: metadata.tokenEndpoint) {
@@ -163,6 +177,9 @@ extension MCPOAuth {
             throw MCPAuthError.incompatibleServer("invalid token endpoint")
         }
         try assertSecureTokenEndpoint(endpoint)
+        guard isAllowedEndpoint(endpoint, serverURL: serverURL) else {
+            throw MCPAuthError.insecureTokenEndpoint(endpoint.absoluteString)
+        }
         var form = parameters
         if let resource { form.append(("resource", resource)) }
         var headers = ["Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"]

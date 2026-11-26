@@ -6,7 +6,9 @@ extension MCPOAuth {
 
     /// RFC 9728 protected resource metadata: the given URL, else path-aware
     /// `/.well-known/oauth-protected-resource<path>`, falling back to the
-    /// root. Throws when the server publishes none.
+    /// root. Throws when the server publishes none. A given URL that
+    /// `isAllowedEndpoint` refuses for `serverURL` (it comes from the
+    /// server's challenge) is passed over for the well-known ones.
     public static func discoverProtectedResourceMetadata(
         serverURL: URL,
         resourceMetadataURL: URL? = nil,
@@ -15,7 +17,7 @@ extension MCPOAuth {
         let response = try await discoverMetadataWithFallback(
             serverURL: serverURL,
             wellKnown: "oauth-protected-resource",
-            metadataURL: resourceMetadataURL,
+            metadataURL: resourceMetadataURL.flatMap { isAllowedEndpoint($0, serverURL: serverURL) ? $0 : nil },
             httpClient: httpClient
         )
         guard let response, response.status != 404 else {
@@ -95,12 +97,18 @@ extension MCPOAuth {
     /// RFC 8414 / OIDC Discovery metadata of an authorization server, or nil
     /// when none is published. The document's `issuer` must equal
     /// `authorizationServerURL` (one trailing `/` tolerated) unless
-    /// `skipIssuerValidation`.
+    /// `skipIssuerValidation`. The server's URL must be an `http` or `https`
+    /// one; with `serverURL`, the MCP server's, it is held to
+    /// `isAllowedEndpoint`.
     public static func discoverAuthorizationServerMetadata(
         _ authorizationServerURL: String,
         skipIssuerValidation: Bool = false,
-        httpClient: any MCPAuthHTTPClient
+        httpClient: any MCPAuthHTTPClient,
+        serverURL: URL? = nil
     ) async throws -> MCPAuthorizationServerMetadata? {
+        guard let url = URL(string: authorizationServerURL), isAllowedEndpoint(url, serverURL: serverURL) else {
+            throw MCPAuthError.incompatibleServer("invalid authorization server URL \(authorizationServerURL)")
+        }
         let headers = [protocolVersionHeader: MCPClient.protocolVersion, "Accept": "application/json"]
         for (url, isOIDC) in discoveryURLs(authorizationServerURL: authorizationServerURL) {
             let response = try await MCPAuthHTTP.send(MCPAuthHTTPRequest(url: url, headers: headers), using: httpClient)
@@ -166,7 +174,8 @@ extension MCPOAuth {
         let metadata = try await discoverAuthorizationServerMetadata(
             server,
             skipIssuerValidation: skipIssuerMetadataValidation,
-            httpClient: httpClient
+            httpClient: httpClient,
+            serverURL: serverURL
         )
         return MCPOAuthServerInfo(
             authorizationServerURL: server,

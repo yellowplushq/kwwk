@@ -49,6 +49,37 @@ extension HTTPClient {
 }
 
 public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
+    /// Which redirects a client's session follows.
+    public enum RedirectPolicy: Sendable {
+        /// Every redirect, as `URLSession` does by default.
+        case follow
+        /// Only one that stays within the origin that answered it, or moves
+        /// plain HTTP to HTTPS on the same host and default ports. Any other
+        /// redirect is not followed: the caller gets the 3xx answer itself,
+        /// and the request's headers and body never reach the other host.
+        case sameOrigin
+
+        /// Whether a redirect from `from` to `to` is followed.
+        func follows(from: URL, to: URL) -> Bool {
+            guard self == .sameOrigin else { return true }
+            guard to.user == nil, to.password == nil,
+                  let fromHost = from.host?.lowercased(), let toHost = to.host?.lowercased(), fromHost == toHost,
+                  let fromScheme = from.scheme?.lowercased(), let toScheme = to.scheme?.lowercased()
+            else { return false }
+            func port(_ url: URL, _ scheme: String) -> Int? {
+                url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil)
+            }
+            switch (fromScheme, toScheme) {
+            case ("https", "https"), ("http", "http"):
+                return port(from, fromScheme) == port(to, toScheme)
+            case ("http", "https"):
+                return port(from, fromScheme) == 80 && port(to, toScheme) == 443
+            default:
+                return false
+            }
+        }
+    }
+
     /// The long-lived session that owns the connection pool. Reused across every
     /// request so TCP/TLS connections are kept alive between API calls instead
     /// of paying a fresh handshake per request.
@@ -63,8 +94,8 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
     /// making and dropping their own.
     public static let shared = URLSessionHTTPClient()
 
-    public init(session: URLSession? = nil) {
-        let delegate = StreamingSessionDelegate()
+    public init(session: URLSession? = nil, redirects: RedirectPolicy = .follow) {
+        let delegate = StreamingSessionDelegate(redirects: redirects)
         self.delegate = delegate
         // A `URLSession`'s delegate is fixed at creation, so an injected session
         // can only donate its configuration; we build our own session bound to
@@ -184,6 +215,11 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
     }
 
     private let states = NIOLockedValueBox<[Int: TaskState]>([:])
+    private let redirects: URLSessionHTTPClient.RedirectPolicy
+
+    init(redirects: URLSessionHTTPClient.RedirectPolicy) {
+        self.redirects = redirects
+    }
 
     // MARK: - Registration (called from `stream(...)`)
 
@@ -240,6 +276,26 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
 
     func urlSession(
         _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard redirects == .sameOrigin else {
+            completionHandler(request)
+            return
+        }
+        guard let from = response.url ?? task.currentRequest?.url, let to = request.url,
+              redirects.follows(from: from, to: to)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+
+    func urlSession(
+        _ session: URLSession,
         dataTask: URLSessionDataTask,
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
@@ -264,22 +320,33 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let id = task.taskIdentifier
-        enum HeaderAction { case none, resume(CheckedContinuation<HTTPURLResponse, Error>, Error) }
+        enum HeaderAction {
+            case none, resume(CheckedContinuation<HTTPURLResponse, Error>, Result<HTTPURLResponse, Error>)
+        }
         enum BodyAction { case none, finish(AsyncThrowingStream<Data, Error>.Continuation, Error?) }
+        // If `didReceive response:` never fired, the header continuation gets
+        // the failure (DNS/connect), or the task's own response when it ended
+        // cleanly without announcing one: swift-corelibs-foundation completes
+        // a redirect the delegate did not follow that way, the 3xx answer as
+        // the task's response.
+        let header: Result<HTTPURLResponse, Error>
+        if error == nil, let http = task.response as? HTTPURLResponse {
+            header = .success(http)
+        } else {
+            header = .failure(error ?? HTTPClientError.invalidResponse)
+        }
 
         let actions: (HeaderAction, BodyAction) = states.withLockedValue { states in
             guard var st = states[id] else { return (.none, .none) }
             var headerAction: HeaderAction = .none
-            // If `didReceive response:` never fired (DNS/connect failure),
-            // surface the error on the header continuation instead.
             if !st.headerResolved {
                 st.headerResolved = true
                 if let cont = st.headerContinuation {
                     st.headerContinuation = nil
                     st.headerDelivered = true
-                    headerAction = .resume(cont, error ?? HTTPClientError.invalidResponse)
+                    headerAction = .resume(cont, header)
                 } else {
-                    st.pendingHeader = .failure(error ?? HTTPClientError.invalidResponse)
+                    st.pendingHeader = header
                 }
             }
             var bodyAction: BodyAction = .none
@@ -297,7 +364,7 @@ private final class StreamingSessionDelegate: NSObject, URLSessionDataDelegate, 
 
         switch actions.0 {
         case .none: break
-        case .resume(let cont, let error): cont.resume(throwing: error)
+        case .resume(let cont, let result): cont.resume(with: result)
         }
         switch actions.1 {
         case .none: break

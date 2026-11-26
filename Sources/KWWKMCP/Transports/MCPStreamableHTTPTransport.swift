@@ -53,10 +53,16 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
         var resourceMetadataURL: URL?
     }
 
+    /// The client of every transport given none: one for the process, like
+    /// `URLSessionHTTPClient.shared`, that follows a redirect only within
+    /// the server's origin. A server cannot send its requests, with their
+    /// session id, configured headers and messages, on to another host.
+    static let defaultHTTPClient = URLSessionHTTPClient(redirects: .sameOrigin)
+
     /// - Parameters:
     ///   - headers: Extra request headers. A token from `auth` replaces any
     ///     `Authorization` header here.
-    ///   - httpClient: Injected for tests; defaults to the shared URLSession client.
+    ///   - httpClient: Injected for tests; defaults to `defaultHTTPClient`.
     ///   - requestTimeoutSeconds: Idle timeout of each POST.
     ///   - auth: How to authenticate; nil sends `headers` only.
     ///   - authHTTPClient: Client of the OAuth requests (discovery, tokens).
@@ -72,7 +78,7 @@ public final class MCPStreamableHTTPTransport: MCPTransport, Sendable {
     ) {
         self.url = url
         self.headers = headers
-        self.httpClient = httpClient ?? URLSessionHTTPClient.shared
+        self.httpClient = httpClient ?? Self.defaultHTTPClient
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.auth = auth
         let authHTTP = authHTTPClient ?? URLSessionMCPAuthHTTPClient.shared

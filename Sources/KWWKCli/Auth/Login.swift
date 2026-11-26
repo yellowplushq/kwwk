@@ -367,8 +367,12 @@ enum Clipboard {
 
 /// Best-effort URL opener. macOS uses `/usr/bin/open`; Linux tries
 /// `xdg-open`, else falls back to stderr so the user can click manually.
+/// Only a web page is opened: the system openers also launch the app behind
+/// any other scheme (`file:`, `smb:`, an app's own), and a sign-in page's
+/// address can come from a server.
 enum Browser {
     static func open(_ url: URL) {
+        guard opens(url) else { return }
         #if os(iOS)
         // iOS has neither `Process` nor `open(1)`. uikittools' `uiopen` hands
         // the URL to SpringBoard, which is the only route from a CLI to a
@@ -402,6 +406,12 @@ enum Browser {
             ))
         }
         #endif
+    }
+
+    /// An `http` or `https` address with a host.
+    static func opens(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return false }
+        return !(url.host ?? "").isEmpty
     }
 }
 

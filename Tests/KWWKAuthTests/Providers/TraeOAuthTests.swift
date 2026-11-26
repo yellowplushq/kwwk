@@ -162,6 +162,27 @@ struct TraeSignInTests {
         #expect(TraeOAuth.guidanceHost(["nothing": 1]) == nil)
     }
 
+    @Test("A sign-in page is a web page: an address with another scheme names none")
+    func signInPageScheme() {
+        #expect(TraeOAuth.origin(of: "https://www.trae.ai/") == "https://www.trae.ai")
+        #expect(TraeOAuth.origin(of: "www.trae.ai") == "https://www.trae.ai")
+        #expect(TraeOAuth.origin(of: "http://127.0.0.1:8080/x") == "http://127.0.0.1:8080")
+        for address in ["smb://evil.example/share", "file://localhost/etc/passwd", "vscode://evil.example/x"] {
+            #expect(TraeOAuth.origin(of: address) == nil, "\(address)")
+            #expect(throws: OAuthError.self, "\(address)") {
+                _ = try TraeOAuth.loginURL(
+                    loginHost: address,
+                    redirect: "http://127.0.0.1:53692/authorize",
+                    machineID: "machine-1",
+                    deviceID: "0",
+                    loginTraceID: "trace-1",
+                    pkce: PKCE(verifier: "verifier", challenge: "challenge"),
+                    profile: .international
+                )
+            }
+        }
+    }
+
     @Test("A sign-in whose gates name no page fails rather than opening one that would not know the client")
     func noSignInHost() async {
         let client = QueuedHTTPClient(Array(repeating: ok("{}"), count: 3))
@@ -436,6 +457,62 @@ struct TraeRenewalTests {
         _ = try await TraeOAuthProvider(site: .international).refresh(credentials, using: abroad)
         #expect(abroad.requests[0].url.absoluteString
             == "https://grow-normal.trae.ai/cloudide/api/v3/trae/oauth/ExchangeToken")
+    }
+
+    @Test("Every gate a sign-in records is renewed at, however it is spelled; an empty one is none")
+    func recordedGates() async throws {
+        let renewal = "/cloudide/api/v3/trae/oauth/ExchangeToken"
+        let builds: [(TraeSite, [String])] = [
+            (.china, TraeOAuth.Profile.china.exchangeOrigins),
+            (.international, TraeOAuth.Profile.international.exchangeOrigins),
+        ]
+        for (site, gates) in builds {
+            for gate in gates {
+                for spelled in [gate, gate + "/", gate.uppercased(), " \(gate)\n"] {
+                    var credentials = stored
+                    credentials.extras["oauthHost"] = .string(spelled)
+                    let client = QueuedHTTPClient([ok(#"{"Result":{"Token":"jwt-new"}}"#)])
+                    let renewed = try await TraeOAuthProvider(site: site).refresh(credentials, using: client)
+                    #expect(client.requests.map(\.url.absoluteString) == [gate + renewal], "\(spelled)")
+                    #expect(renewed.access == "jwt-new")
+                }
+            }
+        }
+        var credentials = stored
+        credentials.extras["oauthHost"] = .string("")
+        let client = QueuedHTTPClient([ok(#"{"Result":{"Token":"jwt-new"}}"#)])
+        _ = try await TraeOAuthProvider(site: .china).refresh(credentials, using: client)
+        #expect(client.requests.map(\.url.absoluteString) == ["https://api.trae.cn" + renewal])
+    }
+
+    @Test("A stored gate that is not a Trae account gate gets no request and ends the login")
+    func foreignGate() async {
+        let gates = [
+            "https://evil.example",
+            "http://api.trae.cn",
+            "https://api.trae.cn.evil.example",
+            "https://api.trae.cn@evil.example",
+            "https://evil.example/x?",
+            "https://evil.example#",
+            "http://169.254.169.254/computeMetadata/v1/?",
+            "file:///etc/passwd",
+            // No URL at all: the renewal used to end the process here.
+            "https://api.trae.cn:port",
+            "https://api trae cn",
+        ]
+        for gate in gates {
+            var credentials = stored
+            credentials.extras["oauthHost"] = .string(gate)
+            let client = QueuedHTTPClient([ok(#"{"Result":{"Token":"jwt-new"}}"#)])
+            do {
+                _ = try await TraeOAuthProvider(site: .china).refresh(credentials, using: client)
+                Issue.record("renewed at \(gate)")
+            } catch {
+                #expect((error as? OAuthRefreshError)?.kind == .rejected, "\(gate)")
+                #expect((error as? OAuthRefreshError)?.status == nil, "\(gate)")
+            }
+            #expect(client.requestCount == 0, "\(gate)")
+        }
     }
 
     @Test("A refresh token the gate no longer takes ends the login; any other refusal may pass")
