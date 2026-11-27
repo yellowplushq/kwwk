@@ -24,7 +24,6 @@ struct ProviderDirectoryTests {
         ("cursor", "cursor", "cursor", "Cursor", nil),
         ("devin", "devin", "devin", "Devin", nil),
         ("kiro", "kiro", "kiro", "Kiro", nil),
-        ("agy", "agy", "agy", "Antigravity CLI", nil),
         ("qoder", "qoder", "qoder", "Qoder", nil),
         ("qoder-cn", "qoder-cn", "qoder-cn", "Qoder CN", nil),
         ("workbuddy", "workbuddy", "workbuddy", "WorkBuddy", nil),
@@ -43,7 +42,7 @@ struct ProviderDirectoryTests {
 
     @Test("directory order is the stored-provider priority order")
     func priorityOrder() {
-        #expect(providerDirectory.map(\.storeId) == Self.expected.map(\.0))
+        #expect(builtInProviderDirectory.map(\.storeId) == Self.expected.map(\.0))
         // storedProviderOrder ranks all known ids by directory order.
         let all = Dictionary(uniqueKeysWithValues: Self.expected.map {
             ($0.0, OAuthCredentials(access: "x", refresh: "", expires: .max))
@@ -103,8 +102,8 @@ struct ProviderDirectoryTests {
         #expect(ProviderAttribution.getProviderDisplayName("openai-compatible") == "OpenAI-compatible")
         #expect(ProviderAttribution.getProviderDisplayName("openrouter") == "OpenRouter")
         #expect(ProviderAttribution.getProviderDisplayName("github-copilot") == "GitHub Copilot")
-        for descriptor in providerDirectory {
-            #expect(ProviderAttribution.displayNames[descriptor.scope] != nil)
+        for descriptor in builtInProviderDirectory {
+            #expect(ProviderAttribution.builtInDisplayNames[descriptor.scope] != nil)
         }
     }
 }

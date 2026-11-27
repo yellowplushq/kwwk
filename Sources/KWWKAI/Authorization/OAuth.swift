@@ -55,7 +55,7 @@ public actor OAuthManager {
     ) {
         self.store = store
         self.source = store
-        self.providers = Dictionary(uniqueKeysWithValues: providers.map { ($0.id, $0) })
+        self.providers = Dictionary(providers.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         self.client = client
     }
 
@@ -71,14 +71,18 @@ public actor OAuthManager {
     ) {
         self.store = nil
         self.source = source
-        self.providers = Dictionary(uniqueKeysWithValues: providers.map { ($0.id, $0) })
+        self.providers = Dictionary(providers.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         self.client = client
     }
 
     /// Every provider `OAuthSubscriptions` can renew, and Devin's, which
     /// renews nothing: it is here so `apiKey(for:)` knows the id.
     public static func defaultProviders() -> [OAuthProvider] {
-        OAuthSubscriptions.refreshers() + [DevinOAuthProvider()]
+        var result = OAuthSubscriptions.refreshers()
+        if !result.contains(where: { $0.id == "devin" }) {
+            result.append(DevinOAuthProvider())
+        }
+        return result
     }
 
     public func register(_ provider: OAuthProvider) {
@@ -122,6 +126,12 @@ public actor OAuthManager {
     /// a `CredentialRejection` that reports that token refused. Resolvers
     /// hand the rejection to the agent loop on `ResolvedProviderAuth`.
     public func authorization(for providerId: String) async throws -> OAuthAuthorization {
+        try await authorizeWithBaseURL(for: providerId).authorization
+    }
+
+    private func authorizeWithBaseURL(
+        for providerId: String
+    ) async throws -> (authorization: OAuthAuthorization, baseURL: String?) {
         guard let provider = providers[providerId] else {
             throw OAuthError.unknownProvider(providerId)
         }
@@ -136,13 +146,15 @@ public actor OAuthManager {
         }
         let apiKey = try await provider.apiKey(from: credentials, using: client)
         let access = credentials.access
-        return OAuthAuthorization(
+        let authorization = OAuthAuthorization(
             apiKey: apiKey,
             access: access,
             onRejected: CredentialRejection(providerId: providerId) { [self] in
                 try await self.reportRejected(access, for: providerId)
             }
         )
+        let baseURL = provider.baseURL(from: credentials).flatMap { $0.isEmpty ? nil : $0 }
+        return (authorization, baseURL)
     }
 
     /// The provider refused `access` for `providerId` at request time, before
@@ -274,31 +286,46 @@ public actor OAuthManager {
         let manager = self
         return { model, _ in
             let oauthId = Self.oauthId(forProvider: model.provider)
-            do {
-                return try await manager.resolvedAuth(for: oauthId)
-            } catch OAuthError.missing, OAuthError.unknownProvider {
-                // No credentials stored for this provider ⇒ an anonymous
-                // request is the correct outcome. A refresh/exchange failure
-                // (any other error) propagates so the provider surfaces it
-                // rather than silently sending an unauthenticated request.
-                // `.expired` is one of those propagating errors on purpose: a
-                // logged-in account whose source served a stale token is a
-                // real fault, and reporting it as "not logged in" would hide
-                // it behind a downstream 401.
-                return nil
-            }
+            return try await manager.resolve(providerId: oauthId, scheme: .bearer, fallbackBaseURL: nil)
         }
     }
 
-    private func resolvedAuth(for providerId: String) async throws -> ResolvedProviderAuth {
-        let authorization = try await authorization(for: providerId)
-        let credentials = try await source.credentials(for: providerId)
-        return ResolvedProviderAuth(
-            token: authorization.apiKey,
-            scheme: .bearer,
-            baseURL: Self.baseURL(forOAuthId: providerId, credentials: credentials),
-            onRejected: authorization.onRejected
-        )
+    /// Build an auth resolver closure pinned to a specific store `providerId`,
+    /// auth `scheme`, and optional fallback `baseURL` (used when the provider's
+    /// `OAuthProvider.baseURL(from:)` returns nil). Suitable for host-registered
+    /// providers whose `model.provider` scope differs from `storeId` or that
+    /// use a custom auth scheme.
+    public nonisolated func resolver(
+        for providerId: String,
+        scheme: AuthScheme = .bearer,
+        baseURL fallbackBaseURL: String? = nil
+    ) -> @Sendable (Model, String?) async throws -> ResolvedProviderAuth? {
+        let manager = self
+        return { _, _ in
+            try await manager.resolve(providerId: providerId, scheme: scheme, fallbackBaseURL: fallbackBaseURL)
+        }
+    }
+
+    private func resolve(
+        providerId: String,
+        scheme: AuthScheme,
+        fallbackBaseURL: String?
+    ) async throws -> ResolvedProviderAuth? {
+        do {
+            let (authorization, dynamicBaseURL) = try await authorizeWithBaseURL(for: providerId)
+            return ResolvedProviderAuth(
+                token: authorization.apiKey,
+                scheme: scheme,
+                baseURL: dynamicBaseURL ?? fallbackBaseURL,
+                onRejected: authorization.onRejected
+            )
+        } catch OAuthError.missing, OAuthError.unknownProvider {
+            // No credentials stored for this provider ⇒ an anonymous request is
+            // the correct outcome. Any other failure (refresh/exchange error,
+            // or an unrefreshable entry served expired) propagates so the
+            // provider surfaces it instead of silently going unauthenticated.
+            return nil
+        }
     }
 
     private static func oauthId(forProvider provider: String) -> String {
@@ -309,22 +336,5 @@ public actor OAuthManager {
         case "cursor": return "cursor"
         default: return provider
         }
-    }
-
-    private static func baseURL(forOAuthId providerId: String, credentials: OAuthCredentials?) -> String? {
-        if providerId == "github-copilot",
-           case .string(let endpoint) = credentials?.extras["endpoint"] ?? .null,
-           !endpoint.isEmpty {
-            return endpoint
-        }
-        if providerId == AgyOAuth.providerId {
-            for key in ["baseUrl", "relayUrl"] {
-                if case .string(let raw) = credentials?.extras[key] ?? .null,
-                   !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return AgyModels.normalizeBaseURL(raw)
-                }
-            }
-        }
-        return nil
     }
 }

@@ -44,12 +44,27 @@ public struct ProviderDescriptor: Sendable {
 }
 
 /// Every stored provider the auth stack can register, in deterministic
-/// priority order: OAuth subscriptions first, then api keys. The first entry
-/// present in the store is the default *active* provider at launch, and the
-/// order also breaks same-scope ties (e.g. Anthropic OAuth wins over Anthropic
-/// API key). Ids not listed here sort last so they surface a clear "not wired
-/// up" notice rather than a silent miss.
-public let providerDirectory: [ProviderDescriptor] = [
+/// priority order: OAuth subscriptions first, then api keys, followed by any
+/// host-registered providers from `StoredProviderRegistry`. A dynamic
+/// registration sharing a built-in `storeId` replaces it in place. The first
+/// entry present in the store is the default *active* provider at launch, and
+/// the order also breaks same-scope ties (e.g. Anthropic OAuth wins over
+/// Anthropic API key). Ids not listed here sort last so they surface a clear
+/// "not wired up" notice rather than a silent miss.
+public var providerDirectory: [ProviderDescriptor] {
+    let dynamic = StoredProviderRegistry.registrations
+    guard !dynamic.isEmpty else { return builtInProviderDirectory }
+    var byStoreId = Dictionary(uniqueKeysWithValues: dynamic.map { ($0.descriptor.storeId, $0.descriptor) })
+    var merged = builtInProviderDirectory.map { builtIn in
+        byStoreId.removeValue(forKey: builtIn.storeId) ?? builtIn
+    }
+    for entry in dynamic where byStoreId[entry.descriptor.storeId] != nil {
+        merged.append(entry.descriptor)
+    }
+    return merged
+}
+
+package let builtInProviderDirectory: [ProviderDescriptor] = [
     ProviderDescriptor(
         storeId: "openai-codex",
         scope: "chatgpt-codex",
@@ -125,13 +140,6 @@ public let providerDirectory: [ProviderDescriptor] = [
         scope: "kiro",
         catalogKey: "kiro",
         displayName: "Kiro",
-        formTitle: nil
-    ),
-    ProviderDescriptor(
-        storeId: AgyOAuth.providerId,
-        scope: AgyOAuth.providerId,
-        catalogKey: AgyOAuth.providerId,
-        displayName: AgyOAuth.name,
         formTitle: nil
     ),
     ProviderDescriptor(
@@ -237,7 +245,10 @@ public let providerDirectory: [ProviderDescriptor] = [
 /// Descriptor for a store id, or nil for unknown / `env:` sentinel ids —
 /// callers fall back to the raw id so unwired credentials still round-trip.
 public func providerDescriptor(forStoreId storeId: String) -> ProviderDescriptor? {
-    providerDirectory.first { $0.storeId == storeId }
+    if let custom = StoredProviderRegistry.registration(forStoreId: storeId) {
+        return custom.descriptor
+    }
+    return builtInProviderDirectory.first { $0.storeId == storeId }
 }
 
 /// The stored provider ids actually present in `all`, in directory priority
@@ -252,8 +263,9 @@ public func storedProviderOrder(_ all: [String: OAuthCredentials]) -> [String] {
 /// (`OAuthCredentialSource.providerIds()`).
 public func storedProviderOrder(ids: [String]) -> [String] {
     let present = Set(ids)
-    var order = providerDirectory.map(\.storeId).filter { present.contains($0) }
-    let known = Set(providerDirectory.map(\.storeId))
+    let directoryIds = providerDirectory.map(\.storeId)
+    var order = directoryIds.filter { present.contains($0) }
+    let known = Set(directoryIds)
     order.append(contentsOf: present.filter { !known.contains($0) }.sorted())
     return order
 }

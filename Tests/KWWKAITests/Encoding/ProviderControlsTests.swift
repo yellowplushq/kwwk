@@ -434,7 +434,7 @@ struct ProviderControlsTests {
 
     @Test("no bundled catalog model sets the fields")
     func bundledCatalogLeavesControlsUnset() {
-        for model in ModelsCatalog.all {
+        for model in ModelsCatalog.bundledAll {
             guard let compat = model.compat else { continue }
             #expect(compat.behavesLikeProvider == nil)
             #expect(compat.maxImagesPerRequest == nil)

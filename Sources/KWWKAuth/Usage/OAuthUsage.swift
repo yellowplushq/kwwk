@@ -77,14 +77,6 @@ public protocol OAuthUsageReader: Sendable {
 
 public enum OAuthUsage {
     /// The providers whose subscriptions expose a usage endpoint kwwk reads.
-    ///
-    /// `AgyUsageReader` is deliberately not registered: it reads Google's
-    /// internal Code Assist endpoints (`v1internal:retrieveUserQuotaSummary`,
-    /// `fetchAvailableModels`, `loadCodeAssist` on cloudcode-pa) with the
-    /// user's own token, and hosts polling those (e.g. a backend serving a
-    /// usage pane) may trip Google's risk controls on the account. The reader
-    /// stays in the module for an explicit caller; registering it here would
-    /// put `agy` into `OAuthSubscriptions.usageIds` and every host's list.
     public static let readers: [String: any OAuthUsageReader] = Dictionary(
         uniqueKeysWithValues: ([
             AnthropicUsageReader(),

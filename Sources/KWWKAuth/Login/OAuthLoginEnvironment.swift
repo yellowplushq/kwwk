@@ -68,7 +68,7 @@ extension OAuthLogin {
     /// Runs `work` while `url` is in front of the user: through the host's
     /// presenter when it has one, otherwise by handing the URL to
     /// `onAuthURL` (the CLI opens the browser there) and running `work`.
-    static func present<Outcome: Sendable>(
+    public static func present<Outcome: Sendable>(
         _ url: URL,
         callbacks: Callbacks,
         while work: @escaping @Sendable () async throws -> Outcome
@@ -81,7 +81,7 @@ extension OAuthLogin {
     }
 
     /// Builds and binds the flow's listener.
-    static func openLoopback(
+    public static func openLoopback(
         _ callbacks: Callbacks,
         host: String = "localhost",
         port: UInt16,
@@ -99,7 +99,7 @@ extension OAuthLogin {
 
     /// Turns a redirect's `error=` into the flow's error, or returns when the
     /// redirect carries none.
-    static func checkCallbackError(_ params: [String: String], provider: String) throws {
+    public static func checkCallbackError(_ params: [String: String], provider: String) throws {
         guard let error = params["error"], !error.isEmpty else { return }
         if error == "access_denied" { throw OAuthLoginError.cancelled }
         let description = params["error_description"].map { ": \($0)" } ?? ""

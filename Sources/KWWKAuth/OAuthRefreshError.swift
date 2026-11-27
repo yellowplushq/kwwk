@@ -61,7 +61,7 @@ public struct OAuthRefreshError: Error, LocalizedError, Sendable, Equatable {
 
     /// POSTs a refresh request. A transport failure is `.unavailable` rather
     /// than a raw `URLError`; an error status is classified.
-    package static func post(
+    public static func post(
         provider: String,
         url: URL,
         headers: [String: String],
@@ -90,7 +90,7 @@ public struct OAuthRefreshError: Error, LocalizedError, Sendable, Equatable {
 
     /// `post`, then the standard token answer; an unreadable one is
     /// `.unavailable`.
-    package static func postForToken(
+    public static func postForToken(
         provider: String,
         url: URL,
         headers: [String: String],

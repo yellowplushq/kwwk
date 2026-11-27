@@ -177,6 +177,14 @@ public struct GitHubCopilotOAuthProvider: OAuthProvider {
             extras: extras
         )
     }
+
+    public func baseURL(from credentials: OAuthCredentials) -> String? {
+        guard case .string(let endpoint) = credentials.extras["endpoint"] ?? .null,
+              !endpoint.isEmpty else {
+            return nil
+        }
+        return endpoint
+    }
 }
 
 // MARK: - Cursor

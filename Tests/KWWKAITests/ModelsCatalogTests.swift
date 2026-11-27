@@ -16,6 +16,7 @@ struct ModelsCatalogTests {
         #expect(!providers.contains("google-gemini-cli"))
         #expect(!providers.contains("google-antigravity"))
         #expect(!providers.contains("antigravity"))
+        #expect(!providers.contains("agy"))
 
         let total = ModelsCatalog.all.count
         #expect(total >= 500)   // pi ships 900+; allow headroom for future trims
