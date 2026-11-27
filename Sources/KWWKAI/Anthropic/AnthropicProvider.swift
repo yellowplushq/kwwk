@@ -39,9 +39,9 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
     /// Route-level output ceiling (Claude Code OAuth uses 64k). API-key
     /// providers leave this nil and use the model capability directly.
     public let maximumOutputTokens: Int?
-    /// Optional wire-level model ID transform (e.g. AirRelay prefixes `agy`
-    /// slugs as `agy/<slug>` while keeping the unprefixed `model.id` on the
-    /// streamed `AssistantMessage`).
+    /// Optional wire-level model ID transform (e.g. a gateway or proxy that
+    /// prefixes model slugs on the wire while keeping the unprefixed `model.id`
+    /// on the streamed `AssistantMessage`).
     public let modelIDTransform: (@Sendable (Model) -> String)?
     /// Optional route-level `ModelCompat` transform applied to request
     /// encoding, headers, and compaction capability checks.

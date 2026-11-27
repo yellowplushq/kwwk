@@ -2,15 +2,15 @@ import Foundation
 
 // MARK: - Helpers
 
-package enum OAuth {
+public enum OAuth {
     /// Safety margin subtracted from every token expiry so callers refresh
     /// slightly early.
-    package static let expiryMarginMs: Int64 = 5 * 60 * 1000
+    public static let expiryMarginMs: Int64 = 5 * 60 * 1000
 
     /// Decode a JWT's `exp` claim (Unix seconds) into an expiry in Unix
     /// milliseconds, subtracting a 5-minute safety margin so callers refresh
     /// slightly early. Returns nil for non-JWT / unparseable tokens.
-    package static func jwtExpiryMillis(_ token: String) -> Int64? {
+    public static func jwtExpiryMillis(_ token: String) -> Int64? {
         let parts = token.split(separator: ".")
         guard parts.count == 3 else { return nil }
         var payload = String(parts[1])
@@ -29,11 +29,11 @@ package enum OAuth {
         return Int64(exp * 1000) - expiryMarginMs
     }
 
-    package struct TokenResponse: Decodable {
-        package let accessToken: String
-        package let refreshToken: String?
-        package let expiresIn: Int
-        package let scope: String?
+    public struct TokenResponse: Decodable, Sendable {
+        public let accessToken: String
+        public let refreshToken: String?
+        public let expiresIn: Int
+        public let scope: String?
 
         enum CodingKeys: String, CodingKey {
             case accessToken = "access_token"
@@ -45,7 +45,7 @@ package enum OAuth {
         /// `expires_in` is optional per RFC 6749 §4.2.2 and xAI omits it when
         /// the lifetime is the default; fall back to one hour rather than
         /// failing the whole token decode.
-        package init(from decoder: Decoder) throws {
+        public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             accessToken = try c.decode(String.self, forKey: .accessToken)
             refreshToken = try c.decodeIfPresent(String.self, forKey: .refreshToken)
@@ -54,7 +54,7 @@ package enum OAuth {
         }
     }
 
-    package static func decodeTokenResponse(_ data: Data) throws -> TokenResponse {
+    public static func decodeTokenResponse(_ data: Data) throws -> TokenResponse {
         do {
             return try JSONDecoder().decode(TokenResponse.self, from: data)
         } catch {
@@ -63,7 +63,7 @@ package enum OAuth {
         }
     }
 
-    package static func urlEncodedForm(_ params: [String: String]) -> String {
+    public static func urlEncodedForm(_ params: [String: String]) -> String {
         params.keys.sorted().map { key -> String in
             let v = params[key] ?? ""
             let encKey = key.addingPercentEncoding(withAllowedCharacters: formAllowed) ?? key

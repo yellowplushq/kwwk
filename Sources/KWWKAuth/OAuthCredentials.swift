@@ -66,6 +66,11 @@ public protocol OAuthProvider: Sendable {
     /// Convert credentials to the api-key string the provider expects.
     /// Defaults to `credentials.access`.
     func apiKey(from credentials: OAuthCredentials, using client: HTTPClient) async throws -> String
+
+    /// Optional per-account API base URL carried on the stored credentials
+    /// (for example, GitHub Copilot Business/Enterprise endpoints or a custom
+    /// relay URL). Defaults to `nil`.
+    func baseURL(from credentials: OAuthCredentials) -> String?
 }
 
 extension OAuthProvider {
@@ -74,6 +79,10 @@ extension OAuthProvider {
         using client: HTTPClient
     ) async throws -> String {
         credentials.access
+    }
+
+    public func baseURL(from credentials: OAuthCredentials) -> String? {
+        nil
     }
 }
 

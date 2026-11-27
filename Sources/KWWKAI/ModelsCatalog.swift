@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 /// Access to pi-mono's curated catalog of 900+ models, bundled as a JSON
 /// resource at `Resources/models.json`. Regenerate with:
@@ -7,13 +8,88 @@ import Foundation
 ///       /path/to/pi-mono/packages/ai/src/models.generated.ts
 ///
 /// Stays in-process cheap: the JSON is parsed once on first access and held
-/// in a `Model` dictionary keyed by provider + id.
+/// in a `Model` dictionary keyed by provider + id. Hosts may dynamically
+/// register additional providers at runtime via `register(provider:models:)`;
+/// register before evaluating any downstream cached snapshot of `byProvider`.
 public enum ModelsCatalog {
+    private static let bundledByProvider: [String: [String: Model]] = loadAll()
+    package static let bundledAll: [Model] = bundledByProvider.values.flatMap { $0.values }
+
+    private struct DynamicOverlay: Sendable {
+        var registered: [String: [String: Model]] = [:]
+        var generation: UInt64 = 0
+        var cached: (byProvider: [String: [String: Model]], all: [Model])?
+    }
+
+    private static let dynamicOverlay = NIOLockedValueBox(DynamicOverlay())
+
+    /// Dynamically register (or replace) the model list for `provider`.
+    /// Passing an empty list removes any dynamic registration for `provider`.
+    /// Performs no disk I/O; merged snapshots rebuild lazily on read.
+    public static func register(provider: String, models: [Model]) {
+        if models.isEmpty {
+            unregister(provider: provider)
+            return
+        }
+        dynamicOverlay.withLockedValue { state in
+            state.registered[provider] = Dictionary(models.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            state.generation &+= 1
+            state.cached = nil
+        }
+    }
+
+    /// Remove any dynamically registered models for `provider`.
+    public static func unregister(provider: String) {
+        dynamicOverlay.withLockedValue { state in
+            guard state.registered.removeValue(forKey: provider) != nil else { return }
+            state.generation &+= 1
+            state.cached = nil
+        }
+    }
+
+    private static func snapshot() -> (byProvider: [String: [String: Model]], all: [Model]) {
+        enum Resolution {
+            case bundled
+            case cached([String: [String: Model]], [Model])
+            case rebuild(UInt64, [String: [String: Model]])
+        }
+        let step: Resolution = dynamicOverlay.withLockedValue { state in
+            guard !state.registered.isEmpty else { return .bundled }
+            if let cached = state.cached {
+                return .cached(cached.byProvider, cached.all)
+            }
+            return .rebuild(state.generation, state.registered)
+        }
+        switch step {
+        case .bundled:
+            return (bundledByProvider, bundledAll)
+        case .cached(let byProvider, let all):
+            return (byProvider, all)
+        case .rebuild(let gen, let registered):
+            // Load bundled JSON outside the overlay lock so register/unregister
+            // never block on disk I/O.
+            var merged = bundledByProvider
+            for (provider, models) in registered {
+                merged[provider] = models
+            }
+            let flat = merged.values.flatMap { $0.values }
+            dynamicOverlay.withLockedValue { state in
+                guard state.generation == gen else { return }
+                state.cached = (merged, flat)
+            }
+            return (merged, flat)
+        }
+    }
+
     /// Provider → model-id → Model.
-    public static let byProvider: [String: [String: Model]] = loadAll()
+    public static var byProvider: [String: [String: Model]] {
+        snapshot().byProvider
+    }
 
     /// Flat list of every model in the catalog.
-    public static let all: [Model] = byProvider.values.flatMap { $0.values }
+    public static var all: [Model] {
+        snapshot().all
+    }
 
     /// Every provider key in the catalog (sorted alphabetically).
     public static var providers: [String] {
@@ -22,12 +98,15 @@ public enum ModelsCatalog {
 
     /// Lookup a model by provider + id.
     public static func model(provider: String, id: String) -> Model? {
-        byProvider[provider]?[id]
+        let custom = dynamicOverlay.withLockedValue { $0.registered[provider] }
+        if let custom { return custom[id] }
+        return bundledByProvider[provider]?[id]
     }
 
     /// All models under a given provider, sorted by id.
     public static func models(for provider: String) -> [Model] {
-        guard let inner = byProvider[provider] else { return [] }
+        let custom = dynamicOverlay.withLockedValue { $0.registered[provider] }
+        guard let inner = custom ?? bundledByProvider[provider] else { return [] }
         return inner.keys.sorted().compactMap { inner[$0] }
     }
 
@@ -81,12 +160,6 @@ public enum ModelsCatalog {
         if out["kiro"] == nil {
             let kiro = loadBundledArray("kiro-models")
             if !kiro.isEmpty { out["kiro"] = kiro }
-        }
-        // Antigravity CLI (`agy`) routes through AirRelay; this seed mirrors
-        // `agy models` so catalog lookups and BYOK stores work out of the box
-        // (while the retired `antigravity` / `google-antigravity` ids stay absent).
-        if out[AgyOAuth.providerId] == nil {
-            out[AgyOAuth.providerId] = AgyModels.seed
         }
         // Qoder's roster is the account's own and every request is built
         // from the live listing; the bundled rows seed the model picker, the

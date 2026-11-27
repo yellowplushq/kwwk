@@ -138,6 +138,9 @@ public func registerStored(
     notice: @escaping @Sendable (String) -> Void = { _ in }
 ) async throws -> ResolvedAuth? {
     guard let creds = try await manager.credentials(for: storeId) else { return nil }
+    if let custom = StoredProviderRegistry.registration(forStoreId: storeId) {
+        return try await custom.register(manager, creds, modelOverride, context1m, primeToken, notice)
+    }
     switch storeId {
     case "openai-codex":
         return await registerCodex(manager: manager, creds: creds, modelOverride: modelOverride, primeToken: primeToken)
@@ -177,14 +180,6 @@ public func registerStored(
         return await registerDevin(manager: manager, modelOverride: modelOverride, primeToken: primeToken)
     case "kiro":
         return await registerKiro(manager: manager, modelOverride: modelOverride, primeToken: primeToken)
-    case AgyOAuth.providerId:
-        return await registerAgy(
-            manager: manager,
-            creds: creds,
-            modelOverride: modelOverride,
-            primeToken: primeToken,
-            notice: notice
-        )
     case "qoder", "qoder-cn":
         return await registerQoder(
             site: .of(storeId),
@@ -320,7 +315,7 @@ private func registerCodex(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId) · ChatGPT Codex",
-        authResolver: oauthResolver(manager: manager, providerId: "openai-codex", scheme: .bearer)
+        authResolver: manager.resolver(for: "openai-codex")
     )
 }
 
@@ -385,7 +380,7 @@ private func registerAnthropicOAuth(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId)\(suffix)",
-        authResolver: oauthResolver(manager: manager, providerId: "anthropic", scheme: .bearer)
+        authResolver: manager.resolver(for: "anthropic")
     )
 }
 
@@ -470,12 +465,7 @@ private func registerGitHubCopilot(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(defaultId) · GitHub Copilot",
-        authResolver: oauthResolver(
-            manager: manager,
-            providerId: "github-copilot",
-            scheme: .bearer,
-            baseURL: baseURLString
-        )
+        authResolver: manager.resolver(for: "github-copilot", baseURL: baseURLString)
     )
 }
 
@@ -516,7 +506,7 @@ private func registerCursor(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId) · Cursor",
-        authResolver: oauthResolver(manager: manager, providerId: "cursor", scheme: .bearer)
+        authResolver: manager.resolver(for: "cursor")
     )
 }
 
@@ -537,7 +527,7 @@ private func registerDevin(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(model.id) · Devin",
-        authResolver: oauthResolver(manager: manager, providerId: "devin", scheme: .bearer)
+        authResolver: manager.resolver(for: "devin")
     )
 }
 
@@ -555,60 +545,6 @@ public func devinModel(id: String) -> Model {
         input: [.text],
         contextWindow: 200_000,
         maxTokens: 64_000
-    )
-}
-
-// MARK: - Antigravity CLI (Google OAuth via AirRelay)
-
-private func registerAgy(
-    manager: OAuthManager,
-    creds: OAuthCredentials,
-    modelOverride: String? = nil,
-    primeToken: Bool = true,
-    notice: @escaping @Sendable (String) -> Void = { _ in }
-) async -> ResolvedAuth? {
-    let rawBaseURL = stringExtra(creds, "baseUrl") ?? stringExtra(creds, "relayUrl")
-    guard let rawBaseURL,
-          !rawBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        notice("stored credentials for 'agy' require an AirRelay baseUrl in extras; skipping.")
-        return nil
-    }
-    let normalizedBase = AgyModels.normalizeBaseURL(rawBaseURL)
-    guard let baseURL = URL(string: normalizedBase),
-          let scheme = baseURL.scheme?.lowercased(),
-          scheme == "http" || scheme == "https",
-          baseURL.host != nil else {
-        notice("stored credentials for 'agy' have an invalid AirRelay baseUrl '\(rawBaseURL)'; skipping.")
-        return nil
-    }
-    if primeToken {
-        _ = try? await manager.apiKey(for: AgyOAuth.providerId)
-    }
-
-    // Never read a relay secret from stored user credentials — relay secrets
-    // belong on the server/gateway side (or explicit programmatic
-    // `ProviderVariants.agyAirRelay(relaySecret:)` callers), never distributed
-    // to or persisted in client credential stores.
-    await APIRegistry.shared.register(
-        ProviderVariants.agyAirRelay(
-            baseURL: baseURL,
-            accessToken: nil,
-            relaySecret: nil
-        ),
-        scope: AgyOAuth.providerId
-    )
-
-    let modelId = modelOverride ?? stringExtra(creds, "defaultModel") ?? AgyModels.defaultModelId
-    let model = AgyModels.model(id: modelId, baseURL: normalizedBase)
-    return ResolvedAuth(
-        model: model,
-        modelLabel: "\(model.id) · \(AgyOAuth.name)",
-        authResolver: oauthResolver(
-            manager: manager,
-            providerId: AgyOAuth.providerId,
-            scheme: .bearer,
-            baseURL: normalizedBase
-        )
     )
 }
 
@@ -664,7 +600,7 @@ private func registerKimiCoding(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId) · \(site.name)",
-        authResolver: oauthResolver(manager: manager, providerId: site.id, scheme: .bearer)
+        authResolver: manager.resolver(for: site.id)
     )
 }
 
@@ -715,7 +651,7 @@ private func registerXaiGrok(
     return ResolvedAuth(
         model: model,
         modelLabel: "\(modelId) · xAI Grok",
-        authResolver: oauthResolver(manager: manager, providerId: "xai", scheme: .bearer)
+        authResolver: manager.resolver(for: "xai")
     )
 }
 
@@ -960,29 +896,4 @@ private func primed(
     fallback: OAuthCredentials
 ) async -> OAuthCredentials {
     (try? await manager.credentials(for: id)) ?? fallback
-}
-
-private func oauthResolver(
-    manager: OAuthManager,
-    providerId: String,
-    scheme: AuthScheme,
-    baseURL: String? = nil
-) -> @Sendable (Model, String?) async throws -> ResolvedProviderAuth? {
-    { _, _ in
-        do {
-            let authorization = try await manager.authorization(for: providerId)
-            return ResolvedProviderAuth(
-                token: authorization.apiKey,
-                scheme: scheme,
-                baseURL: baseURL,
-                onRejected: authorization.onRejected
-            )
-        } catch OAuthError.missing, OAuthError.unknownProvider {
-            // Not logged in for this provider ⇒ anonymous. Any other failure
-            // (refresh/exchange error, or an unrefreshable entry served
-            // expired) propagates so the request surfaces it instead of
-            // silently going out unauthenticated.
-            return nil
-        }
-    }
 }

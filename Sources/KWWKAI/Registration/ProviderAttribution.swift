@@ -14,9 +14,14 @@ public enum ProviderAttribution {
     /// Complete provider id → human-readable display name map. Ported from pi's
     /// `BUILT_IN_PROVIDER_DISPLAY_NAMES`, plus the kwwk-specific ids the CLI
     /// registers (`chatgpt-codex` wire scope, `openai-codex` catalog key,
-    /// `openai-compatible` custom endpoints).
-    public static let displayNames: [String: String] = [
-        "agy": "Antigravity CLI",
+    /// `openai-compatible` custom endpoints) and any host-registered providers.
+    public static var displayNames: [String: String] {
+        let extra = StoredProviderRegistry.attributionDisplayNames
+        guard !extra.isEmpty else { return builtInDisplayNames }
+        return builtInDisplayNames.merging(extra) { _, dynamic in dynamic }
+    }
+
+    package static let builtInDisplayNames: [String: String] = [
         "anthropic": "Anthropic",
         "amazon-bedrock": "Amazon Bedrock",
         "ant-ling": "Ant Ling",
@@ -71,7 +76,9 @@ public enum ProviderAttribution {
     /// Human-readable name for `provider`, falling back to the id itself.
     /// Used by the model selector / auth-status display.
     public static func getProviderDisplayName(_ provider: String) -> String {
-        displayNames[provider] ?? provider
+        StoredProviderRegistry.attributionDisplayName(for: provider)
+            ?? builtInDisplayNames[provider]
+            ?? provider
     }
 
     // MARK: - Attribution headers
