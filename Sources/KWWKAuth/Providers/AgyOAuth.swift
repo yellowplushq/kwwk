@@ -63,6 +63,14 @@ public enum AgyOAuth {
     /// Maximum time login or refresh waits on best-effort Code Assist project discovery.
     public static let projectLookupTimeoutSeconds: Double = 10
 
+    /// Whether sign-in and refresh look up the Code Assist project
+    /// (`POST v1internal:loadCodeAssist` on cloudcode-pa) by default. Off:
+    /// the project id only feeds `AgyUsageReader`, which is no longer
+    /// registered, and calling Google's internal Code Assist endpoints on
+    /// the user's behalf may trip Google's risk controls on the account.
+    /// A caller that wants it passes `lookUpProjectId: true`.
+    public static let looksUpProjectId = false
+
     /// Build Google's authorization URL with PKCE (`S256`), offline access,
     /// consent prompt, and all seven `agy` scopes.
     public static func authorizeURL(
@@ -118,15 +126,17 @@ extension OAuthLogin {
     /// loopback listener (`http://localhost:<port>/oauth-callback`, using a
     /// dynamic free port by default), exchanges the authorization code for
     /// access + refresh tokens, and best-effort records the user's email in
-    /// `extras["email"]` and Code Assist companion project in
-    /// `extras["projectId"]`.
+    /// `extras["email"]` and — only when `lookUpProjectId` (off by default,
+    /// see `AgyOAuth.looksUpProjectId`) — the Code Assist companion project
+    /// in `extras["projectId"]`.
     public static func loginAgy(
         port: UInt16 = AgyOAuth.callbackPort,
         callbacks: Callbacks,
         client: HTTPClient = URLSessionHTTPClient(),
         productionHost: URL = AgyUsageReader.defaultProductionHost,
         hubVersion: AgyHubVersion = .shared,
-        projectLookupTimeoutSeconds: Double = AgyOAuth.projectLookupTimeoutSeconds
+        projectLookupTimeoutSeconds: Double = AgyOAuth.projectLookupTimeoutSeconds,
+        lookUpProjectId: Bool = AgyOAuth.looksUpProjectId
     ) async throws -> OAuthCredentials {
         let pkce = PKCE.random()
         let state = PKCE.randomHex(bytes: 16)
@@ -190,13 +200,16 @@ extension OAuthLogin {
 
         let idToken = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["id_token"] as? String
         let email = try await fetchAgyEmail(accessToken: tokens.accessToken, idToken: idToken, client: client)
-        let projectId = await AgyUsageReader.bestEffortProjectId(
-            access: tokens.accessToken,
-            productionHost: productionHost,
-            hubVersion: hubVersion,
-            timeoutSeconds: projectLookupTimeoutSeconds,
-            client: client
-        )
+        var projectId: String?
+        if lookUpProjectId {
+            projectId = await AgyUsageReader.bestEffortProjectId(
+                access: tokens.accessToken,
+                productionHost: productionHost,
+                hubVersion: hubVersion,
+                timeoutSeconds: projectLookupTimeoutSeconds,
+                client: client
+            )
+        }
         try Task.checkCancellation()
 
         var extras: [String: JSONValue] = [:]
@@ -254,8 +267,9 @@ extension OAuthLogin {
 /// Refreshes an Antigravity CLI (`agy`) Google OAuth login via Google's
 /// standard token endpoint. Preserves the existing refresh token when Google
 /// omits `refresh_token` from the response, preserves `extras`, best-effort
-/// backfills `extras["projectId"]` via `loadCodeAssist` when absent (skipping
-/// the lookup when already cached), and classifies permanent grant revocations
+/// backfills `extras["projectId"]` via `loadCodeAssist` when absent and
+/// `lookUpProjectId` is set (off by default, see `AgyOAuth.looksUpProjectId`;
+/// skipped when already cached), and classifies permanent grant revocations
 /// (`400`/`401` -> `.rejected`) separately from transient failures
 /// (`429`/`5xx`/transport -> `.unavailable`).
 public struct AgyOAuthProvider: OAuthProvider {
@@ -267,6 +281,7 @@ public struct AgyOAuthProvider: OAuthProvider {
     public let productionHost: URL
     public let hubVersion: AgyHubVersion
     public let projectLookupTimeoutSeconds: Double
+    public let lookUpProjectId: Bool
 
     public init(
         tokenURL: URL = AgyOAuth.tokenURL,
@@ -274,7 +289,8 @@ public struct AgyOAuthProvider: OAuthProvider {
         clientSecret: String = AgyOAuth.clientSecret,
         productionHost: URL = AgyUsageReader.defaultProductionHost,
         hubVersion: AgyHubVersion = .shared,
-        projectLookupTimeoutSeconds: Double = AgyOAuth.projectLookupTimeoutSeconds
+        projectLookupTimeoutSeconds: Double = AgyOAuth.projectLookupTimeoutSeconds,
+        lookUpProjectId: Bool = AgyOAuth.looksUpProjectId
     ) {
         self.tokenURL = tokenURL
         self.clientID = clientID
@@ -282,6 +298,7 @@ public struct AgyOAuthProvider: OAuthProvider {
         self.productionHost = productionHost
         self.hubVersion = hubVersion
         self.projectLookupTimeoutSeconds = projectLookupTimeoutSeconds
+        self.lookUpProjectId = lookUpProjectId
     }
 
     public func refresh(
@@ -317,7 +334,7 @@ public struct AgyOAuthProvider: OAuthProvider {
             return credentials.refresh
         }()
         var extras = credentials.extras
-        if AgyOAuth.projectId(credentials) == nil {
+        if lookUpProjectId, AgyOAuth.projectId(credentials) == nil {
             let projectId = await AgyUsageReader.bestEffortProjectId(
                 access: json.accessToken,
                 productionHost: productionHost,
