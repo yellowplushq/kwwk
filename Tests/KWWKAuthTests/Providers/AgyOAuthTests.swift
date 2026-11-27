@@ -101,7 +101,8 @@ struct AgyOAuthTests {
                 recordedPort: { port in askedPortLock.withLock { askedPort = port } }
             ),
             client: client,
-            hubVersion: AgyHubVersion(fixed: "2.35.1")
+            hubVersion: AgyHubVersion(fixed: "2.35.1"),
+            lookUpProjectId: true
         )
 
         #expect(askedPortLock.withLock { askedPort } == 0)
@@ -172,7 +173,8 @@ struct AgyOAuthTests {
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
             client: client,
-            hubVersion: AgyHubVersion(fixed: "2.35.1")
+            hubVersion: AgyHubVersion(fixed: "2.35.1"),
+            lookUpProjectId: true
         )
         #expect(credentials.access == "ya29.a")
         #expect(AgyOAuth.email(credentials) == "jwt-user@example.com")
@@ -190,7 +192,8 @@ struct AgyOAuthTests {
         let credentials = try await OAuthLogin.loginAgy(
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
             client: client,
-            hubVersion: AgyHubVersion(fixed: "2.35.1")
+            hubVersion: AgyHubVersion(fixed: "2.35.1"),
+            lookUpProjectId: true
         )
         #expect(credentials.access == "ya29.a")
         #expect(AgyOAuth.email(credentials) == nil)
@@ -210,7 +213,8 @@ struct AgyOAuthTests {
             callbacks: callbacks(presenter: RecordingPresenter(), params: ["code": "c"], made: LoopbackBox()),
             client: client,
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
-            projectLookupTimeoutSeconds: 0.05
+            projectLookupTimeoutSeconds: 0.05,
+            lookUpProjectId: true
         )
 
         #expect(credentials.access == "ya29.slow")
@@ -315,7 +319,7 @@ struct AgyOAuthTests {
                 .response(status: 200, body: #"{"cloudaicompanionProject":"proj-backfilled"}"#),
             ])
 
-            let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: client)
+            let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1"), lookUpProjectId: true).refresh(stale, using: client)
             #expect(client.requestCount == 2)
             #expect(client.requests[1].url.absoluteString == "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
             #expect(client.header("Authorization", request: 1) == "Bearer ya29.refreshed")
@@ -333,7 +337,7 @@ struct AgyOAuthTests {
             .response(status: 500, body: "server error"),
         ])
 
-        let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: failClient)
+        let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1"), lookUpProjectId: true).refresh(stale, using: failClient)
         #expect(failClient.requestCount == 2)
         #expect(refreshed.access == "ya29.new")
         #expect(refreshed.refresh == "1//rotated")
@@ -345,7 +349,8 @@ struct AgyOAuthTests {
         ])
         let timedOut = try await AgyOAuthProvider(
             hubVersion: AgyHubVersion(fixed: "2.35.1"),
-            projectLookupTimeoutSeconds: 0.05
+            projectLookupTimeoutSeconds: 0.05,
+            lookUpProjectId: true
         ).refresh(stale, using: slowClient)
         #expect(timedOut.access == "ya29.timeout")
         #expect(AgyOAuth.projectId(timedOut) == nil)
@@ -363,7 +368,7 @@ struct AgyOAuthTests {
             .response(status: 200, body: #"{"access_token":"ya29.fresh","expires_in":3600}"#),
             .response(status: 200, body: #"{"cloudaicompanionProject":"proj-10s"}"#),
         ])
-        let ok = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: timeoutRecorder)
+        let ok = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1"), lookUpProjectId: true).refresh(stale, using: timeoutRecorder)
         #expect(AgyOAuth.projectId(ok) == "proj-10s")
         #expect(timeoutRecorder.recordedTimeouts.count == 2)
         #expect(timeoutRecorder.recordedTimeouts[1] == AgyOAuth.projectLookupTimeoutSeconds)
@@ -374,7 +379,7 @@ struct AgyOAuthTests {
             .response(status: 200, body: #"{"access_token":"ya29.hung","expires_in":3600}"#),
         ])
         let task = Task {
-            try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: hungClient)
+            try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1"), lookUpProjectId: true).refresh(stale, using: hungClient)
         }
         await hungClient.waitUntilHung()
         task.cancel()
@@ -441,7 +446,6 @@ struct AgyOAuthTests {
         let client = QueuedHTTPClient([
             .response(status: 200, body: #"{"access_token":"ya29.sub","refresh_token":"1//sub","expires_in":3600}"#),
             .response(status: 200, body: #"{"email":"sub@example.com"}"#),
-            .response(status: 200, body: #"{"cloudaicompanionProject":"proj-sub"}"#),
         ])
         let creds = try await OAuthSubscriptions.login(
             providerId: "agy",
@@ -451,7 +455,26 @@ struct AgyOAuthTests {
         #expect(creds.access == "ya29.sub")
         #expect(creds.refresh == "1//sub")
         #expect(AgyOAuth.email(creds) == "sub@example.com")
-        #expect(AgyOAuth.projectId(creds) == "proj-sub")
+        // Code Assist project discovery is off by default: no loadCodeAssist.
+        #expect(client.requestCount == 2)
+        #expect(!client.requests.contains { $0.url.absoluteString.contains("cloudcode-pa") })
+        #expect(AgyOAuth.projectId(creds) == nil)
+    }
+
+    @Test("AgyOAuthProvider.refresh does not call loadCodeAssist by default, even without a cached projectId")
+    func refreshSkipsProjectLookupByDefault() async throws {
+        #expect(AgyOAuth.looksUpProjectId == false)
+        let stale = OAuthCredentials(access: "old", refresh: "1//r", expires: 0, extras: ["email": .string("u@example.com")])
+        let client = QueuedHTTPClient([
+            .response(status: 200, body: #"{"access_token":"ya29.plain","expires_in":3600}"#),
+        ])
+
+        let refreshed = try await AgyOAuthProvider(hubVersion: AgyHubVersion(fixed: "2.35.1")).refresh(stale, using: client)
+        #expect(client.requestCount == 1)
+        #expect(client.requests[0].url == AgyOAuth.tokenURL)
+        #expect(refreshed.access == "ya29.plain")
+        #expect(AgyOAuth.projectId(refreshed) == nil)
+        #expect(refreshed.extras == stale.extras)
     }
 }
 
