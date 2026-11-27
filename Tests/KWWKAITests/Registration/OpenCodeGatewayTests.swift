@@ -115,6 +115,128 @@ struct OpenCodeGatewayTests {
         #expect(base.closed == ["ses_3"])
     }
 
+    @Test("direct wire calls to opencode.ai stamp x-opencode-session and User-Agent without OpenCodeRequestProvider", arguments: [
+        ("openai-completions", "https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash",
+         "https://opencode.ai/inference/go/openai/v1/chat/completions"),
+        ("openai-completions", "https://opencode.ai/zen/go/v1", "glm-5.3",
+         "https://opencode.ai/zen/go/v1/chat/completions"),
+        ("openai-responses", "https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash",
+         "https://opencode.ai/inference/go/openai/v1/responses"),
+        ("anthropic-messages", "https://opencode.ai/inference/go/anthropic", "claude-haiku-5-5",
+         "https://opencode.ai/inference/go/anthropic/v1/messages"),
+        ("anthropic-messages", "https://opencode.ai/inference/go/anthropic/v1", "claude-haiku-5-5",
+         "https://opencode.ai/inference/go/anthropic/v1/messages"),
+        ("anthropic-messages", "https://opencode.ai/zen/go/v1", "claude-haiku-5-5",
+         "https://opencode.ai/zen/go/v1/messages"),
+        ("google-generative-ai", "https://opencode.ai/inference/go/google", "gemini-4-argon",
+         "https://opencode.ai/inference/go/google/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse"),
+    ])
+    func directCustomEndpointToOpenCode(
+        api: String,
+        baseURL: String,
+        modelId: String,
+        expectedURL: String
+    ) async throws {
+        let client = StubSSEClient(body: "")
+        let ws = StubWebSocketClient(error: ProviderFailure(message: "There was a bad response from the server.", httpStatus: 404))
+        let provider: any APIProvider = switch api {
+        case "openai-completions":
+            OpenAICompletionsProvider(api: "custom-wire", client: client, defaultBaseURL: URL(string: baseURL)!, defaultAPIKey: "oc_sk_test")
+        case "openai-responses":
+            OpenAIResponsesProvider(api: "custom-wire", client: client, webSocketClient: ws, defaultBaseURL: URL(string: baseURL)!, defaultAPIKey: "oc_sk_test")
+        case "anthropic-messages":
+            AnthropicProvider(api: "custom-wire", client: client, defaultBaseURL: URL(string: baseURL)!, defaultAPIKey: "oc_sk_test")
+        default:
+            GoogleGeminiProvider(
+                api: "custom-wire",
+                client: client,
+                defaultBaseURL: URL(string: baseURL)!,
+                defaultAPIKey: "oc_sk_test",
+                authHeaderBuilder: { ["Authorization": "Bearer \($0)"] }
+            )
+        }
+        let model = Model(id: modelId, api: "custom-wire", provider: "custom", baseURL: baseURL, maxTokens: 4096)
+        let stream = provider.stream(
+            model: model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: StreamOptions(cacheRetention: CacheRetention.none, sessionId: "ses_custom")
+        )
+        for await _ in stream {}
+
+        let request = try #require(client.lastRequest)
+        #expect(request.url.absoluteString == expectedURL)
+        #expect(Self.header(request.headers, "x-opencode-session") == "ses_custom")
+        #expect(request.headers.keys.filter { $0.lowercased() == "x-opencode-session" }.count == 1)
+        #expect(Self.header(request.headers, "user-agent") == OpenCodeRequestProvider.defaultUserAgent)
+        // OpenAI Responses on opencode.ai skips the doomed 404 WebSocket handshake in `.auto` mode.
+        #expect(ws.connectCount == 0)
+
+        // Chat Completions on opencode.ai sends `max_tokens` (not `max_completion_tokens`) and omits `store`.
+        if api == "openai-completions", let body = request.body {
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(json["max_tokens"] as? Int == 4096)
+            #expect(json["max_completion_tokens"] == nil)
+            #expect(json["store"] == nil)
+        }
+    }
+
+    @Test("direct wire calls to opencode.ai preserve caller headers and mint a fresh session when absent")
+    func directOpenCodeHeaderPrecedence() async throws {
+        let model = Model(
+            id: "deepseek-v4.1-flash",
+            api: "openai-completions",
+            provider: "custom",
+            baseURL: "https://opencode.ai/inference/go/openai/v1",
+            headers: ["X-OpenCode-Session": "from-model", "User-Agent": "my-agent/2.0"]
+        )
+        let client = StubSSEClient(body: "")
+        let provider = OpenAICompletionsProvider(client: client, defaultAPIKey: "oc_sk_test")
+        let s1 = provider.stream(
+            model: model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: StreamOptions(sessionId: "ses_1", headers: ["x-opencode-session": "   "])
+        )
+        for await _ in s1 {}
+        let h1 = try #require(client.lastRequest?.headers)
+        #expect(Self.header(h1, "x-opencode-session") == "from-model")
+        #expect(h1.keys.filter { $0.lowercased() == "x-opencode-session" }.count == 1)
+        #expect(Self.header(h1, "user-agent") == "my-agent/2.0")
+
+        let bare = Model(
+            id: "deepseek-v4.1-flash",
+            api: "openai-completions",
+            provider: "custom",
+            baseURL: "https://opencode.ai/inference/go/openai/v1"
+        )
+        let s2 = provider.stream(model: bare, context: Context(messages: [.user(UserMessage(text: "hi"))]), options: nil)
+        for await _ in s2 {}
+        let h2 = try #require(client.lastRequest?.headers)
+        let minted = try #require(Self.header(h2, "x-opencode-session"))
+        #expect(UUID(uuidString: minted) != nil)
+    }
+
+    @Test("lookalike and unrelated hosts never get OpenCode headers")
+    func hostMatchingIsStrict() async throws {
+        for baseURL in [
+            "https://api.openai.com/v1",
+            "https://notopencode.ai/v1",
+            "https://opencode.ai.example.com/v1",
+        ] {
+            let client = StubSSEClient(body: "")
+            let provider = OpenAICompletionsProvider(client: client, defaultAPIKey: "k")
+            let model = Model(id: "m", api: "openai-completions", provider: "custom", baseURL: baseURL)
+            let s = provider.stream(
+                model: model,
+                context: Context(messages: [.user(UserMessage(text: "hi"))]),
+                options: StreamOptions(sessionId: "ses_1")
+            )
+            for await _ in s {}
+            let headers = try #require(client.lastRequest?.headers)
+            #expect(Self.header(headers, "x-opencode-session") == nil)
+            #expect(Self.header(headers, "user-agent") == nil)
+        }
+    }
+
     private static func header(_ headers: [String: String], _ name: String) -> String? {
         headers.first { $0.key.lowercased() == name }?.value
     }

@@ -72,6 +72,101 @@ struct LiveOpenCodeTests {
         }
     }
 
+    @Test func customEndpointDirectWiresAnswer() async {
+        let env = ProcessInfo.processInfo.environment
+        guard let key = await Self.key(for: .go, env: env) else {
+            Issue.record("No key for opencode-go: set OPENCODE_API_KEY or log in to it")
+            return
+        }
+        let cases: [(String, any APIProvider, Model)] = [
+            (
+                "custom-responses-native",
+                OpenAIResponsesProvider(
+                    api: "live-custom-resp-native",
+                    defaultBaseURL: URL(string: "https://opencode.ai/inference/go/openai/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "grok-4.7", api: "live-custom-resp-native", provider: "custom", baseURL: "https://opencode.ai/inference/go/openai/v1")
+            ),
+            (
+                "custom-responses-translated",
+                OpenAIResponsesProvider(
+                    api: "live-custom-resp-glm",
+                    defaultBaseURL: URL(string: "https://opencode.ai/inference/go/openai/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "glm-5.3", api: "live-custom-resp-glm", provider: "custom", baseURL: "https://opencode.ai/inference/go/openai/v1")
+            ),
+            (
+                "custom-completions",
+                OpenAICompletionsProvider(
+                    api: "live-custom-chat",
+                    defaultBaseURL: URL(string: "https://opencode.ai/inference/go/openai/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "glm-5.3", api: "live-custom-chat", provider: "custom", baseURL: "https://opencode.ai/inference/go/openai/v1")
+            ),
+            (
+                "custom-zen-completions",
+                OpenAICompletionsProvider(
+                    api: "live-custom-zen-chat",
+                    defaultBaseURL: URL(string: "https://opencode.ai/zen/go/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "glm-5.3", api: "live-custom-zen-chat", provider: "custom", baseURL: "https://opencode.ai/zen/go/v1")
+            ),
+            (
+                "custom-anthropic-v1",
+                AnthropicProvider(
+                    api: "live-custom-ant",
+                    defaultBaseURL: URL(string: "https://opencode.ai/inference/go/anthropic/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "claude-haiku-5-5", api: "live-custom-ant", provider: "custom", baseURL: "https://opencode.ai/inference/go/anthropic/v1")
+            ),
+            (
+                "custom-zen-anthropic-v1",
+                AnthropicProvider(
+                    api: "live-custom-zen-ant",
+                    defaultBaseURL: URL(string: "https://opencode.ai/zen/go/v1")!,
+                    defaultAPIKey: key
+                ),
+                Model(id: "claude-haiku-5-5", api: "live-custom-zen-ant", provider: "custom", baseURL: "https://opencode.ai/zen/go/v1")
+            ),
+            (
+                "custom-gemini",
+                GoogleGeminiProvider(
+                    api: "live-custom-gemini",
+                    defaultBaseURL: URL(string: "https://opencode.ai/inference/go/google")!,
+                    defaultAPIKey: key,
+                    authHeaderBuilder: { ["Authorization": "Bearer \($0)"] }
+                ),
+                Model(id: "gemini-4-argon", api: "live-custom-gemini", provider: "custom", baseURL: "https://opencode.ai/inference/go/google")
+            ),
+        ]
+        for (label, provider, model) in cases {
+            let session = UUID().uuidString
+            let events = provider.stream(
+                model: model,
+                context: Context(
+                    systemPrompt: "You are a helpful assistant. Give a brief answer.",
+                    messages: [.user(UserMessage(text: "Reply with the word OK."))]
+                ),
+                options: StreamOptions(apiKey: key, sessionId: session)
+            )
+            var deltas = 0
+            for await event in events {
+                if case .textDelta = event { deltas += 1 }
+            }
+            let result = await events.result()
+            let category = result.providerFailure?.category.rawValue ?? "none"
+            let status = result.providerFailure?.httpStatus.map(String.init) ?? "none"
+            print("OpenCode live \(label) model=\(model.id) stop=\(result.stopReason) deltas=\(deltas) category=\(category) status=\(status)")
+            #expect(result.stopReason == .stop || result.stopReason == .length, "\(label)")
+            #expect(deltas > 0, "\(label)")
+        }
+    }
+
     private static func key(for plan: OpenCodePlan, env: [String: String]) async -> String? {
         if let key = env["OPENCODE_API_KEY"], !key.isEmpty { return key }
         guard let store = try? OAuthStore(url: OAuthStore.defaultURL()) else { return nil }

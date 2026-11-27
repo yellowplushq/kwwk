@@ -126,7 +126,11 @@ struct ProviderAuditRegressionTests {
             let connection = StubWebSocketConnection(batches: [], receiveError: phase == "receive" ? failure : nil,
                                                     sendErrors: phase == "send" ? [failure] : [])
             let websocket = StubWebSocketClient(connection: connection, error: phase == "connect" ? failure : nil)
-            let provider = OpenAIResponsesProvider(client: http, webSocketClient: websocket)
+            let provider = OpenAIResponsesProvider(
+                client: http,
+                webSocketClient: websocket,
+                webSocketEndpoints: OpenAIResponsesWebSocketEndpoints()
+            )
             let result = await provider.stream(model: OpenAIResponsesTests.model, context: Context(messages: []),
                                               options: StreamOptions(sessionId: UUID().uuidString)).result()
             #expect(http.lastRequest == nil)
@@ -134,6 +138,75 @@ struct ProviderAuditRegressionTests {
             #expect(result.failure?.httpStatus == status)
             #expect(result.failure?.retryAfterMs == 2500)
         }
+    }
+
+    @Test(arguments: [404, 405, 426, 501])
+    func unsupportedWebSocketUpgradeFallsBackToHTTPAndDisablesEndpoint(status: Int) async {
+        for phase in ["connect", "send", "receive"] {
+            let http = StubSSEClient(body: OpenAIResponsesTests.textSSE)
+            let failure = ProviderFailure(message: "There was a bad response from the server.", httpStatus: status)
+            let connection = StubWebSocketConnection(batches: [], receiveError: phase == "receive" ? failure : nil,
+                                                    sendErrors: phase == "send" ? [failure] : [])
+            let websocket = StubWebSocketClient(connection: connection, error: phase == "connect" ? failure : nil)
+            let endpoints = OpenAIResponsesWebSocketEndpoints()
+            let provider = OpenAIResponsesProvider(
+                client: http,
+                webSocketClient: websocket,
+                webSocketEndpoints: endpoints
+            )
+            var model = OpenAIResponsesTests.model
+            model.baseURL = "https://relay.example.com/v1"
+            let session = UUID().uuidString
+
+            let first = await provider.stream(model: model, context: Context(messages: []),
+                                              options: StreamOptions(sessionId: session)).result()
+            #expect(first.stopReason == .stop)
+            #expect(http.lastRequest != nil)
+            #expect(websocket.connectCount == 1)
+            #expect(endpoints.isUnusable(URL(string: "wss://relay.example.com/v1/responses")!))
+
+            // Subsequent turns skip WebSocket completely for this endpoint.
+            let second = await provider.stream(model: model, context: Context(messages: []),
+                                               options: StreamOptions(sessionId: UUID().uuidString)).result()
+            #expect(second.stopReason == .stop)
+            #expect(websocket.connectCount == 1)
+        }
+    }
+
+    @Test func webSocket404WithProviderCodeDoesNotFallBack() async {
+        let http = StubSSEClient(body: OpenAIResponsesTests.textSSE)
+        let failure = ProviderFailure(message: "model not found", httpStatus: 404, providerCode: "model_not_found")
+        let websocket = StubWebSocketClient(error: failure)
+        let provider = OpenAIResponsesProvider(
+            client: http,
+            webSocketClient: websocket,
+            webSocketEndpoints: OpenAIResponsesWebSocketEndpoints()
+        )
+        let result = await provider.stream(model: OpenAIResponsesTests.model, context: Context(messages: []),
+                                           options: StreamOptions(sessionId: UUID().uuidString)).result()
+        #expect(http.lastRequest == nil)
+        #expect(result.stopReason == .error)
+        #expect(result.failure?.httpStatus == 404)
+    }
+
+    @Test func webSocket404AfterFirstEventDoesNotFallBack() async {
+        let http = StubSSEClient(body: OpenAIResponsesTests.textSSE)
+        let failure = ProviderFailure(message: "There was a bad response from the server.", httpStatus: 404)
+        let connection = StubWebSocketConnection(
+            batches: [OpenAIResponsesTests.responseCreatedOnly],
+            receiveError: failure
+        )
+        let websocket = StubWebSocketClient(connection: connection)
+        let provider = OpenAIResponsesProvider(
+            client: http,
+            webSocketClient: websocket,
+            webSocketEndpoints: OpenAIResponsesWebSocketEndpoints()
+        )
+        let result = await provider.stream(model: OpenAIResponsesTests.model, context: Context(messages: []),
+                                           options: StreamOptions(sessionId: UUID().uuidString)).result()
+        #expect(http.lastRequest == nil)
+        #expect(result.stopReason == .error)
+        #expect(result.failure?.httpStatus == 404)
     }
 
     @Test(arguments: [400, 402, 429, 503])

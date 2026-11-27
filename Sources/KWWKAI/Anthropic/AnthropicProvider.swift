@@ -100,7 +100,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
     ) async throws -> NativeCompactionResult? {
         let effective = effectiveModel(model)
         let base = effective.baseURL.isEmpty ? defaultBaseURL.absoluteString : effective.baseURL
-        let url = URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/messages")!
+        let url = Self.messagesURL(baseURL: effective.baseURL, defaultBaseURL: defaultBaseURL)
         guard Self.supportsNativeCompaction(model: effective, baseURL: base) else { return nil }
         let fallbackEnabled = Self.usesServerSideFallback(model: effective, url: url, options: options)
         var nativeContext = context
@@ -128,7 +128,7 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             "type": "compact_20260112", "trigger": ["type": "input_tokens", "value": 50_000],
             "pause_after_compaction": true, "instructions": .string(instructions),
         ]]]
-        var headers = makeHeaders(model: effective, context: context, options: options, fallbackEnabled: fallbackEnabled)
+        var headers = makeHeaders(model: effective, context: context, options: options, url: url, fallbackEnabled: fallbackEnabled)
         headers["accept"] = "application/json"
         let beta = headers["anthropic-beta"].map { $0 + "," } ?? ""
         headers["anthropic-beta"] = beta + "compact-2026-01-12"
@@ -191,10 +191,21 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
             options: .regularExpression) != nil
     }
 
+    /// Builds the `/v1/messages` URL without doubling `/v1` when `baseURL`
+    /// already carries it (e.g. `https://opencode.ai/zen/go/v1` or
+    /// `https://opencode.ai/inference/go/anthropic/v1`).
+    static func messagesURL(baseURL: String, defaultBaseURL: URL) -> URL {
+        var base = baseURL.isEmpty ? defaultBaseURL.absoluteString : baseURL
+        while base.hasSuffix("/") { base.removeLast() }
+        let versioned = base.hasSuffix("/v1") ? base : "\(base)/v1"
+        return URL(string: "\(versioned)/messages") ?? defaultBaseURL.appendingPathComponent("v1/messages")
+    }
+
     private func makeHeaders(
         model: Model,
         context: Context,
         options: StreamOptions?,
+        url: URL,
         fallbackEnabled: Bool = false
     ) -> [String: String] {
         var headers: [String: String] = [
@@ -256,6 +267,13 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         if Self.toolChangePlan(model: model, context: context).anchorsChanges {
             appendBeta(Self.inlineToolsBeta)
         }
+        if OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url) {
+            OpenCodeRequestProvider.applyGatewayHeaders(
+                into: &headers,
+                sources: [options?.headers, options?.resolvedAuth?.headers, extraHeaders, model.headers],
+                options: options
+            )
+        }
 
         return headers
     }
@@ -316,14 +334,10 @@ public final class AnthropicProvider: APIProvider, NativeCompactionProvider, @un
         options: StreamOptions?
     ) async {
         let effective = effectiveModel(model)
-        let url: URL = {
-            var base = effective.baseURL.isEmpty ? defaultBaseURL.absoluteString : effective.baseURL
-            while base.hasSuffix("/") { base.removeLast() }
-            return URL(string: "\(base)/v1/messages") ?? defaultBaseURL.appendingPathComponent("v1/messages")
-        }()
+        let url = Self.messagesURL(baseURL: effective.baseURL, defaultBaseURL: defaultBaseURL)
 
         let fallbackEnabled = Self.usesServerSideFallback(model: effective, url: url, options: options)
-        let headers = makeHeaders(model: effective, context: context, options: options, fallbackEnabled: fallbackEnabled)
+        let headers = makeHeaders(model: effective, context: context, options: options, url: url, fallbackEnabled: fallbackEnabled)
 
         // Retry once after stripping thinking blocks whose signatures the
         // endpoint rejected (e.g. relay failover to another Anthropic org).

@@ -104,6 +104,13 @@ public final class GoogleGeminiProvider: APIProvider, @unchecked Sendable {
             for (k, v) in builder(key) { headers[k] = v }
         }
         for (k, v) in options?.headers ?? [:] { headers[k] = v }
+        if OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url) {
+            OpenCodeRequestProvider.applyGatewayHeaders(
+                into: &headers,
+                sources: [options?.headers, options?.resolvedAuth?.headers, extraHeaders, model.headers],
+                options: options
+            )
+        }
 
         do {
             let (response, stream) = try await client.stream(

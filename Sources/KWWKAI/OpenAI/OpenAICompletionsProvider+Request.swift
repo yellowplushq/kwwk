@@ -132,7 +132,7 @@ extension OpenAICompletionsProvider {
         let isCfGateway = provider == "cloudflare-ai-gateway" || has("gateway.ai.cloudflare.com")
         let isCerebras = provider == "cerebras" || has("cerebras.ai")
         let isChutes = has("chutes.ai")
-        let isOpencode = provider == "opencode" || has("opencode.ai")
+        let isOpencode = OpenCodeRequestProvider.isOpenCode(provider: provider, baseURL: model.baseURL)
         let isNonStandard = isNvidia || isCerebras || isGrok || isTogether || isChutes
             || isDeepSeek || isZai || isMoonshot || isOpencode || isCloudflareWorkers
             || isCfGateway || isAntLing
@@ -141,7 +141,7 @@ extension OpenAICompletionsProvider {
         // developer by default, as in pi (b82477b, pi #10741), whose catalog
         // no longer carries `supportsDeveloperRole: false`.
         let isOpenAI = provider == "openai" || has("api.openai.com")
-        let useMaxTokens = isChutes || isMoonshot || isCfGateway || isTogether || isNvidia || isAntLing
+        let useMaxTokens = isChutes || isMoonshot || isCfGateway || isTogether || isNvidia || isAntLing || isOpencode
 
         let detectedReasoningEffort = !isGrok && !isZai && !isMoonshot && !isTogether
             && !isCfGateway && !isNvidia && !isAntLing

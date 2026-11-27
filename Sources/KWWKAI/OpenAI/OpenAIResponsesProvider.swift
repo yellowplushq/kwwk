@@ -147,6 +147,13 @@ public final class OpenAIResponsesProvider:
             mergeHeader(&headers, name: key, value: value, append: false)
         }
         if let sessionId = options?.sessionId { headers["session_id"] = sessionId }
+        if OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url) {
+            OpenCodeRequestProvider.applyGatewayHeaders(
+                into: &headers,
+                sources: [options?.headers, options?.resolvedAuth?.headers, extraHeaders, model.headers],
+                options: options
+            )
+        }
         let json: [String: JSONValue]
         if codex {
             let compacted = try await client.compactionSSE(
@@ -266,7 +273,13 @@ public final class OpenAIResponsesProvider:
         let transport = options?.transport ?? .auto
         let wsURL = webSocketURLBuilder(url)
         let endpointUnusable = webSocketEndpoints.isUnusable(wsURL)
+        // OpenCode's gateway serves Responses over HTTP/SSE only and answers
+        // WebSocket upgrades with 404; skip the doomed handshake in `.auto`
+        // mode (matching `ProviderVariants.openCodeProviders`).
+        let openCodeHTTPOnly = transport == .auto
+            && OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url)
         if transport != .sse,
+           !openCodeHTTPOnly,
            let webSocketClient,
            !session.webSocketDisabled,
            !endpointUnusable {
@@ -353,6 +366,13 @@ public final class OpenAIResponsesProvider:
     ) async -> Bool {
         var headers = makeHeaders(options: options, accept: "text/event-stream")
         Self.nameXaiConversation(&headers, model: model, options: options)
+        if OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url) {
+            OpenCodeRequestProvider.applyGatewayHeaders(
+                into: &headers,
+                sources: [options?.headers, options?.resolvedAuth?.headers, extraHeaders, model.headers],
+                options: options
+            )
+        }
         await options?.emitVerbose(
             source: "openai.responses.http",
             message: "starting HTTP stream",
@@ -432,6 +452,13 @@ public final class OpenAIResponsesProvider:
     ) async -> WebSocketRunResult {
         var headers = makeHeaders(options: options, accept: nil)
         Self.nameXaiConversation(&headers, model: model, options: options)
+        if OpenCodeRequestProvider.isOpenCode(provider: model.behaviorProvider, url: url) {
+            OpenCodeRequestProvider.applyGatewayHeaders(
+                into: &headers,
+                sources: [options?.headers, options?.resolvedAuth?.headers, extraHeaders, model.headers],
+                options: options
+            )
+        }
         // Match Codex's WebSocket transport: the Responses WebSocket beta
         // header replaces the HTTP/SSE `responses=experimental` beta.
         mergeHeader(&headers, name: "OpenAI-Beta", value: "responses_websockets=2026-02-06", append: false)
@@ -514,12 +541,17 @@ public final class OpenAIResponsesProvider:
                 Self.finishAborted(out: out, state: state)
                 return .completed
             }
-            if !Self.permitsWebSocketFallback(error) {
+            if !Self.permitsWebSocketFallback(error, beforeFirstEvent: true) {
                 session.resetWebSocketState()
                 Self.finishWebSocketFailure(error, out: out, state: state)
                 return .failedWithoutFallback
             }
-            let failure = recordWebSocketFailure(session: session, url: url)
+            let failure: OpenAIResponsesWebSocketFailureStatus
+            if Self.isWebSocketUnsupportedUpgrade(ProviderFailure.capture(error)) {
+                failure = disableWebSocketEndpoint(session: session, url: url)
+            } else {
+                failure = recordWebSocketFailure(session: session, url: url)
+            }
             await options?.emitVerbose(
                 source: verboseSource,
                 message: "WebSocket setup failed; falling back to HTTP",
@@ -637,13 +669,19 @@ public final class OpenAIResponsesProvider:
                 Self.finishAborted(out: out, state: state)
                 return .completed
             }
-            if !Self.permitsWebSocketFallback(error) {
+            let beforeFirstEvent = !progress.hasReceivedEvent
+            if !Self.permitsWebSocketFallback(error, beforeFirstEvent: beforeFirstEvent) {
                 session.resetWebSocketState()
                 Self.finishWebSocketFailure(error, out: out, state: state)
                 return .failedWithoutFallback
             }
-            let failure = recordWebSocketFailure(session: session, url: url)
-            if !progress.hasReceivedEvent {
+            let failure: OpenAIResponsesWebSocketFailureStatus
+            if beforeFirstEvent, Self.isWebSocketUnsupportedUpgrade(ProviderFailure.capture(error)) {
+                failure = disableWebSocketEndpoint(session: session, url: url)
+            } else {
+                failure = recordWebSocketFailure(session: session, url: url)
+            }
+            if beforeFirstEvent {
                 await options?.emitVerbose(
                     source: verboseSource,
                     message: "WebSocket failed before response event; falling back to HTTP",
@@ -707,6 +745,22 @@ public final class OpenAIResponsesProvider:
             out.end(err)
             return .failedWithoutFallback
         }
+    }
+
+    /// Marks an endpoint HTTP-only right away (for servers that answer the
+    /// WebSocket upgrade handshake with 404/405/426/501).
+    private func disableWebSocketEndpoint(
+        session: OpenAIResponsesSessionState,
+        url: URL
+    ) -> OpenAIResponsesWebSocketFailureStatus {
+        session.resetWebSocketState(disable: true)
+        let endpoint = webSocketEndpoints.markUnusable(url)
+        return OpenAIResponsesWebSocketFailureStatus(
+            count: maxWebSocketFailures,
+            disabled: true,
+            endpointCount: endpoint.count,
+            endpointUnusable: endpoint.unusable
+        )
     }
 
     /// Counts a WebSocket failure against both the session and the endpoint.
@@ -1092,11 +1146,30 @@ public final class OpenAIResponsesProvider:
 
     // MARK: - Encoding
 
+    /// Status codes an HTTP-only Responses endpoint returns to a WebSocket
+    /// upgrade handshake (`GET` with `Upgrade: websocket`): `404` on gateways
+    /// without a WS route (e.g. `opencode.ai`), `405` on POST-only routers,
+    /// `426` / `501` when upgrade is unsupported.
+    private static let webSocketUnsupportedStatuses: Set<Int> = [404, 405, 426, 501]
+
+    private static func isWebSocketUnsupportedUpgrade(_ failure: ProviderFailure) -> Bool {
+        guard let status = failure.httpStatus,
+              webSocketUnsupportedStatuses.contains(status),
+              failure.providerCode == nil,
+              failure.shouldRetry != false else { return false }
+        return true
+    }
+
     /// A transport switch is not a second chance at a rejected API request.
     /// Explicit HTTP/provider failures go to the shared policy, which also
-    /// honors Retry-After. Only pre-output transport/setup failures may fall back.
-    private static func permitsWebSocketFallback(_ error: any Error) -> Bool {
+    /// honors Retry-After. Only pre-output transport/setup failures — and
+    /// pre-event HTTP statuses that signal WebSocket upgrades are unsupported
+    /// on this route (`404`/`405`/`426`/`501`) — may fall back.
+    private static func permitsWebSocketFallback(_ error: any Error, beforeFirstEvent: Bool) -> Bool {
         let failure = ProviderFailure.capture(error)
+        if beforeFirstEvent, isWebSocketUnsupportedUpgrade(failure) {
+            return true
+        }
         guard failure.httpStatus == nil, failure.providerCode == nil, failure.shouldRetry != false else { return false }
         switch failure.category {
         case .transport, .timeout, .unknown: return true
@@ -1760,6 +1833,17 @@ public final class OpenAIResponsesWebSocketEndpoints: Sendable {
             state.failures[key] = count
             if count >= max(1, threshold) { state.unusable.insert(key) }
             return Failure(count: count, unusable: state.unusable.contains(key))
+        }
+    }
+
+    @discardableResult
+    public func markUnusable(_ url: URL) -> Failure {
+        state.withLockedValue { state in
+            let key = url.absoluteString
+            let count = state.failures[key, default: 0] + 1
+            state.failures[key] = count
+            state.unusable.insert(key)
+            return Failure(count: count, unusable: true)
         }
     }
 
