@@ -344,4 +344,101 @@ struct URLSessionHTTPClientCancellationTests {
         let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
         #expect(elapsedSeconds < 10)
     }
+
+    #if canImport(Darwin)
+    @Test("real URLSessionWebSocketClient 404 upgrade falls back to HTTP SSE and skips WS on turn 2")
+    func realWebSocket404FallsBackToHTTPSSE() async throws {
+        let sse = OpenAIResponsesTests.textSSE
+        final class HTTPOnlyResponsesHandler: ChannelInboundHandler, @unchecked Sendable {
+            typealias InboundIn = ByteBuffer
+            let sse: String
+            let counts: LockedCounts
+            var buffer = ""
+            var responded = false
+
+            init(sse: String, counts: LockedCounts) {
+                self.sse = sse
+                self.counts = counts
+            }
+
+            func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+                var buf = unwrapInboundIn(data)
+                if let str = buf.readString(length: buf.readableBytes) {
+                    buffer += str
+                }
+                guard !responded, buffer.contains("\r\n\r\n") else { return }
+                responded = true
+                let response: String
+                if buffer.hasPrefix("GET ") {
+                    counts.recordGet()
+                    response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    counts.recordPost()
+                    let bodyBytes = Data(sse.utf8)
+                    response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \(bodyBytes.count)\r\nConnection: close\r\n\r\n" + sse
+                }
+                var out = context.channel.allocator.buffer(capacity: response.utf8.count)
+                out.writeString(response)
+                let channel = context.channel
+                context.writeAndFlush(NIOAny(out)).whenComplete { _ in
+                    channel.close(promise: nil)
+                }
+            }
+        }
+        final class LockedCounts: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _gets = 0
+            private var _posts = 0
+            func recordGet() { lock.withLock { _gets += 1 } }
+            func recordPost() { lock.withLock { _posts += 1 } }
+            var gets: Int { lock.withLock { _gets } }
+            var posts: Int { lock.withLock { _posts } }
+        }
+
+        let counts = LockedCounts()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(HTTPOnlyResponsesHandler(sse: sse, counts: counts))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        defer { group.shutdownGracefully { _ in } }
+        let port = server.localAddress!.port!
+
+        let base = "http://127.0.0.1:\(port)/v1"
+        let endpoints = OpenAIResponsesWebSocketEndpoints()
+        let provider = OpenAIResponsesProvider(
+            api: "custom-local",
+            client: URLSessionHTTPClient(),
+            webSocketClient: URLSessionWebSocketClient(),
+            defaultBaseURL: URL(string: base)!,
+            defaultAPIKey: "sk-local",
+            webSocketEndpoints: endpoints
+        )
+        let model = Model(id: "test-model", api: "custom-local", provider: "custom", baseURL: base)
+
+        let first = await provider.stream(
+            model: model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: StreamOptions(sessionId: "local-session-1")
+        ).result()
+        #expect(first.stopReason == .stop)
+        #expect(first.content == [.text(TextContent(text: "Hello, world"))])
+        #expect(counts.gets == 1)
+        #expect(counts.posts == 1)
+        #expect(endpoints.isUnusable(URL(string: "ws://127.0.0.1:\(port)/v1/responses")!))
+
+        let second = await provider.stream(
+            model: model,
+            context: Context(messages: [.user(UserMessage(text: "again"))]),
+            options: StreamOptions(sessionId: "local-session-2")
+        ).result()
+        #expect(second.stopReason == .stop)
+        #expect(second.content == [.text(TextContent(text: "Hello, world"))])
+        #expect(counts.gets == 1)
+        #expect(counts.posts == 2)
+    }
+    #endif
 }

@@ -117,11 +117,57 @@ extension ProviderVariants {
 /// `/responses/compact`, so compaction is kwwk's own summary today).
 struct OpenCodeRequestProvider: APIProvider, APIProviderSessionLifecycle, NativeCompactionProvider {
     static let sessionHeader = "x-opencode-session"
+    static let defaultUserAgent = "kwwk-coding-agent"
 
     let base: any APIProvider
     let plan: OpenCodePlan
 
     var api: String { base.api }
+
+    /// Whether `provider` or `url` targets OpenCode's model gateway (`opencode.ai`).
+    static func isOpenCode(provider: String, url: URL?) -> Bool {
+        if provider == OpenCodePlan.go.id || provider == OpenCodePlan.zen.id {
+            return true
+        }
+        guard let host = url?.host?.lowercased() else { return false }
+        let normalized = host.hasSuffix(".") ? String(host.dropLast()) : host
+        return normalized == "opencode.ai" || normalized.hasSuffix(".opencode.ai")
+    }
+
+    static func isOpenCode(provider: String, baseURL: String) -> Bool {
+        isOpenCode(provider: provider, url: URL(string: baseURL))
+    }
+
+    /// Ensures requests targeting OpenCode's gateway carry a single non-empty
+    /// `x-opencode-session` header (required by Go before auth, and used for
+    /// routing/prompt-cache affinity on Zen) and a coding-agent `User-Agent`
+    /// when the caller did not set one.
+    static func applyGatewayHeaders(
+        into headers: inout [String: String],
+        sources: [[String: String]?],
+        options: StreamOptions?
+    ) {
+        let fromSources = sources
+            .lazy
+            .compactMap { $0.flatMap(sessionHeader(in:)) }
+            .first
+        let fromHeaders = fromSources == nil ? sessionHeader(in: headers) : nil
+        let fromSession = options?.sessionId.flatMap {
+            $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0
+        }
+        let value = fromSources ?? fromHeaders ?? fromSession ?? UUID().uuidString.lowercased()
+        headers = withoutSessionHeader(headers)
+        headers[sessionHeader] = value
+
+        let hasUserAgent = headers.contains {
+            $0.key.lowercased() == "user-agent"
+                && !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if !hasUserAgent {
+            headers = headers.filter { $0.key.lowercased() != "user-agent" }
+            headers["User-Agent"] = defaultUserAgent
+        }
+    }
 
     func stream(model: Model, context: Context, options: StreamOptions?) -> AssistantMessageStream {
         base.stream(model: routed(model), context: context, options: stamped(options, model: model))
@@ -164,7 +210,9 @@ struct OpenCodeRequestProvider: APIProvider, APIProviderSessionLifecycle, Native
             .lazy
             .compactMap { $0.flatMap(Self.sessionHeader(in:)) }
             .first
-        let session = stamped.sessionId.flatMap { $0.isEmpty ? nil : $0 }
+        let session = stamped.sessionId.flatMap {
+            $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0
+        }
         var headers = Self.withoutSessionHeader(stamped.headers ?? [:])
         headers[Self.sessionHeader] = set ?? session ?? UUID().uuidString.lowercased()
         stamped.headers = headers
@@ -177,7 +225,10 @@ struct OpenCodeRequestProvider: APIProvider, APIProviderSessionLifecycle, Native
 
     /// A non-empty session header among `headers`, in any spelling.
     static func sessionHeader(in headers: [String: String]) -> String? {
-        headers.first { $0.key.lowercased() == sessionHeader && !$0.value.isEmpty }?.value
+        headers.first {
+            $0.key.lowercased() == sessionHeader
+                && !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+        }?.value
     }
 
     static func withoutSessionHeader(_ headers: [String: String]) -> [String: String] {
