@@ -472,8 +472,9 @@ struct AgyUsageTests {
         #expect(hung.cancelReasons == ["cancelled"])
     }
 
-    @Test("AgyUsageReader is registered in OAuthUsage.readers under agy")
-    func registered() {
-        #expect(OAuthUsage.readers["agy"] is AgyUsageReader)
+    @Test("AgyUsageReader is not registered in OAuthUsage.readers, so agy reports no usage")
+    func notRegistered() {
+        #expect(OAuthUsage.readers["agy"] == nil)
+        #expect(!OAuthSubscriptions.usageIds.contains("agy"))
     }
 }

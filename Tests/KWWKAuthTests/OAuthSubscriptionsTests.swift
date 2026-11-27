@@ -42,7 +42,9 @@ struct OAuthSubscriptionsTests {
         let known = Set(OAuthSubscriptions.providers.map(\.id))
         #expect(OAuthSubscriptions.usageIds.isSubset(of: known))
         #expect(OAuthSubscriptions.usageIds.contains("kiro"))
-        #expect(OAuthSubscriptions.usageIds.contains("agy"))
+        // Antigravity's reader calls Google's internal quota endpoints; it is
+        // kept but not registered.
+        #expect(!OAuthSubscriptions.usageIds.contains("agy"))
         #expect(OAuthSubscriptions.usageIds.contains("kimi-coding"))
         #expect(OAuthSubscriptions.usageIds.contains("kimi-coding-ai"))
         // A key or a session has no windows kwwk reads.
