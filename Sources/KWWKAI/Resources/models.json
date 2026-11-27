@@ -19218,8 +19218,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.164,
-        "output" : 0.275
+        "input" : 0.34,
+        "output" : 0.1
       },
       "id" : "google\/gemma-4-31B-it",
       "input" : [
@@ -19502,8 +19502,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.1,
-        "output" : 0.32
+        "input" : 0.22,
+        "output" : 0.5
       },
       "id" : "meta-llama\/Llama-3.3-70B-Instruct",
       "input" : [
@@ -20563,12 +20563,12 @@
       "compat" : {
         "supportsStrictMode" : true
       },
-      "contextWindow" : 262144,
+      "contextWindow" : 131072,
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.089999999999999997,
-        "output" : 0.55
+        "input" : 0.14,
+        "output" : 0.8
       },
       "id" : "Qwen\/Qwen3-235B-A22B-Instruct-2507",
       "input" : [
@@ -20677,7 +20677,7 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.1,
+        "input" : 0.089999999999999997,
         "output" : 1.1
       },
       "id" : "Qwen\/Qwen3-Next-80B-A3B-Instruct",
@@ -21478,8 +21478,8 @@
       "cost" : {
         "cacheRead" : 0,
         "cacheWrite" : 0,
-        "input" : 0.074999999999999997,
-        "output" : 0.3
+        "input" : 0.059999999999999998,
+        "output" : 0.24
       },
       "id" : "thinkingmachines\/Inkling-2-Mini",
       "input" : [
@@ -32015,16 +32015,16 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.035000000000000003,
+        "cacheRead" : 0.0014419999999999999,
         "cacheWrite" : 0,
-        "input" : 0.047,
-        "output" : 0.3
+        "input" : 0.045319999999999999,
+        "output" : 0.13596
       },
       "id" : "~deepseek\/deepseek-v4-flash-latest",
       "input" : [
         "text"
       ],
-      "maxTokens" : 943718,
+      "maxTokens" : 131072,
       "name" : "DeepSeek: DeepSeek V4 Flash Latest",
       "provider" : "openrouter",
       "reasoning" : true,
@@ -34814,7 +34814,7 @@
       "cost" : {
         "cacheRead" : 0.035000000000000003,
         "cacheWrite" : 0,
-        "input" : 0.047,
+        "input" : 0.045600000000000002,
         "output" : 0.3
       },
       "id" : "deepseek\/deepseek-v4-flash-0731",
@@ -34927,8 +34927,8 @@
       "cost" : {
         "cacheRead" : 0.2,
         "cacheWrite" : 0,
-        "input" : 0.888188,
-        "output" : 1.5082
+        "input" : 0.86711,
+        "output" : 1.5228
       },
       "id" : "deepseek\/deepseek-v4-pro",
       "input" : [
@@ -34993,10 +34993,10 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.0041999999999999997,
+        "cacheRead" : 0.0010139999999999999,
         "cacheWrite" : 0,
-        "input" : 0.14,
-        "output" : 0.42
+        "input" : 0.050700000000000002,
+        "output" : 0.2028
       },
       "id" : "deepseek\/deepseek-v4.1-flash",
       "input" : [
@@ -35038,10 +35038,10 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.0060000000000000001,
+        "cacheRead" : 0.0030000000000000001,
         "cacheWrite" : 0,
-        "input" : 0.3,
-        "output" : 1.2
+        "input" : 0.15,
+        "output" : 0.6
       },
       "id" : "deepseek\/deepseek-v4.1-flash-1017",
       "input" : [
@@ -37008,7 +37008,7 @@
       "provider" : "openrouter",
       "reasoning" : true
     },
-    "inclusionai\/ling-3.2-flash:free" : {
+    "inclusionai\/ling-3.2-flash" : {
       "api" : "openai-completions",
       "baseUrl" : "https:\/\/openrouter.ai\/api\/v1",
       "compat" : {
@@ -37018,12 +37018,12 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0,
+        "cacheRead" : 0.059999999999999998,
         "cacheWrite" : 0,
-        "input" : 0,
-        "output" : 0
+        "input" : 0.3,
+        "output" : 0.9
       },
-      "id" : "inclusionai\/ling-3.2-flash:free",
+      "id" : "inclusionai\/ling-3.2-flash",
       "input" : [
         "text",
         "image"
@@ -37039,7 +37039,7 @@
         }
       },
       "maxTokens" : 262144,
-      "name" : "inclusionAI: Ling 3.2 Flash (free)",
+      "name" : "inclusionAI: Ling 3.2 Flash",
       "provider" : "openrouter",
       "reasoning" : true
     },
@@ -47278,10 +47278,10 @@
       },
       "contextWindow" : 1048576,
       "cost" : {
-        "cacheRead" : 0.035000000000000003,
+        "cacheRead" : 0.050000000000000003,
         "cacheWrite" : 0,
-        "input" : 0.35,
-        "output" : 0.7
+        "input" : 0.5,
+        "output" : 1
       },
       "id" : "xiaomi\/mimo-v2.6-flash-mopd",
       "input" : [
