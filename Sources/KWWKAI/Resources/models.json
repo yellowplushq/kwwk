@@ -16533,6 +16533,7 @@
       "api" : "openai-responses",
       "baseUrl" : "https:\/\/api.individual.githubcopilot.com",
       "compat" : {
+        "reasoningSummaryDefault" : "detailed",
         "supportsAdditionalTools" : true,
         "supportsMidConvoEffort" : true,
         "supportsMidConvoSystemMessages" : true,

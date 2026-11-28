@@ -203,7 +203,8 @@ public struct StreamOptions: Sendable {
     public var cancellation: CancellationHandle?
 
     /// OpenAI Responses reasoning-summary verbosity (`auto`/`concise`/`detailed`,
-    /// or `.omit` to drop the field). `nil` ⇒ provider default (`auto`).
+    /// or `.omit` to drop the field). `nil` ⇒ the model's
+    /// `compat.reasoningSummaryDefault`, else `auto`.
     /// Providers without an analog ignore this.
     public var reasoningSummary: ReasoningSummary?
 

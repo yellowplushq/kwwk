@@ -493,6 +493,113 @@ struct OpenAIResponsesTests {
         #expect(json?["include"] as? [String] == ["reasoning.encrypted_content"])
     }
 
+    // MARK: - compat.reasoningSummaryDefault (omp #20804)
+
+    /// A row of the bundled catalog, read past any runtime registration
+    /// another test may hold for the same provider.
+    private static func bundledRow(provider: String, id: String) throws -> Model {
+        try #require(ModelsCatalog.bundledAll.first { $0.provider == provider && $0.id == id })
+    }
+
+    /// The request body a bundled catalog row sends through the route its
+    /// provider registers: Copilot's login set for `github-copilot`, a plain
+    /// Responses provider otherwise.
+    private static func catalogRequestBody(
+        provider providerName: String,
+        id: String,
+        options: StreamOptions
+    ) async throws -> [String: Any] {
+        let model = try bundledRow(provider: providerName, id: id)
+        let client = StubSSEClient(body: textSSE)
+        let provider: any APIProvider
+        if providerName == "github-copilot" {
+            provider = try #require(
+                ProviderVariants.githubCopilotProviders(client: client).first { $0.api == model.api }
+            )
+        } else {
+            provider = OpenAIResponsesProvider(client: client, webSocketClient: nil, defaultAPIKey: "k")
+        }
+        _ = await provider.stream(
+            model: model,
+            context: Context(messages: [.user(UserMessage(text: "hi"))]),
+            options: options
+        ).result()
+        return try #require(
+            JSONSerialization.jsonObject(with: client.lastRequest?.body ?? Data()) as? [String: Any]
+        )
+    }
+
+    private static func summaryOnWire(
+        provider: String,
+        id: String,
+        summary: ReasoningSummary? = nil
+    ) async throws -> String? {
+        let body = try await catalogRequestBody(
+            provider: provider,
+            id: id,
+            options: StreamOptions(
+                apiKey: "tid_session",
+                transport: .sse,
+                reasoning: .high,
+                reasoningSummary: summary
+            )
+        )
+        let reasoning = try #require(body["reasoning"] as? [String: Any])
+        #expect(reasoning["effort"] as? String == "high")
+        return reasoning["summary"] as? String
+    }
+
+    @Test("Copilot gpt-6.2-sol sends summary detailed when the caller names no level")
+    func copilotSolDefaultsToDetailedSummary() async throws {
+        let row = try Self.bundledRow(provider: "github-copilot", id: "gpt-6.2-sol")
+        #expect(row.compat?.reasoningSummaryDefault == .detailed)
+        let summary = try await Self.summaryOnWire(provider: "github-copilot", id: "gpt-6.2-sol")
+        #expect(summary == "detailed")
+    }
+
+    @Test("An explicit summary level, or an explicit omission, wins over the model's default")
+    func explicitSummaryWinsOverCompatDefault() async throws {
+        let concise = try await Self.summaryOnWire(provider: "github-copilot", id: "gpt-6.2-sol", summary: .concise)
+        #expect(concise == "concise")
+        let auto = try await Self.summaryOnWire(provider: "github-copilot", id: "gpt-6.2-sol", summary: .auto)
+        #expect(auto == "auto")
+        let omitted = try await Self.summaryOnWire(provider: "github-copilot", id: "gpt-6.2-sol", summary: .omit)
+        #expect(omitted == nil)
+    }
+
+    @Test("Copilot models the default was not verified on, and Sol on other hosts, keep summary auto")
+    func summaryDefaultStaysOnCopilotSol() async throws {
+        let astra = try await Self.summaryOnWire(provider: "github-copilot", id: "gpt-6.2-astra")
+        #expect(astra == "auto")
+        let openAISol = try await Self.summaryOnWire(provider: "openai", id: "gpt-6.2-sol")
+        #expect(openAISol == "auto")
+        let withDefault = ModelsCatalog.bundledAll.filter { $0.compat?.reasoningSummaryDefault != nil }
+        #expect(withDefault.map { "\($0.provider)/\($0.id)" } == ["github-copilot/gpt-6.2-sol"])
+    }
+
+    @Test("The summary default does not turn reasoning on by itself")
+    func summaryDefaultNeedsReasoningEngaged() async throws {
+        let body = try await Self.catalogRequestBody(
+            provider: "github-copilot",
+            id: "gpt-6.2-sol",
+            options: StreamOptions(apiKey: "tid_session", transport: .sse)
+        )
+        #expect(body["reasoning"] == nil)
+        #expect(body["include"] == nil)
+    }
+
+    @Test("compat.reasoningSummaryDefault decodes from a catalog compat block")
+    func reasoningSummaryDefaultDecodes() throws {
+        let compat = try JSONDecoder().decode(
+            ModelCompat.self,
+            from: Data(#"{"reasoningSummaryDefault":"concise","supportsStrictMode":true}"#.utf8)
+        )
+        #expect(compat.reasoningSummaryDefault == .concise)
+        #expect(compat.supportsStrictMode == true)
+        let empty = try JSONDecoder().decode(ModelCompat.self, from: Data("{}".utf8))
+        #expect(empty.reasoningSummaryDefault == nil)
+    }
+
     @Test("service_tier=flex is passed through in the request body")
     func serviceTierFlexPassthrough() async throws {
         let client = StubSSEClient(body: Self.textSSE)
