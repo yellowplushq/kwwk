@@ -70,6 +70,14 @@ public struct ModelCompat: Codable, Sendable, Hashable {
     /// `tool_search_call` / `tool_search_output` items.
     public var supportsToolSearch: Bool?
 
+    // MARK: openai-responses
+    /// The `reasoning.summary` level a Responses request carries when reasoning
+    /// is engaged and the caller named no `StreamOptions.reasoningSummary`.
+    /// nil ⇒ `auto`. A level the caller sets always wins. For host/model pairs
+    /// whose `auto` summaries come back sparse or blank: GitHub Copilot's
+    /// gpt-6.2-sol takes `detailed` (omp `reasoning-summary-default`, #20804).
+    public var reasoningSummaryDefault: ReasoningSummary?
+
     // MARK: chatgpt-codex
     /// The `service_tier` values the Codex backend honours for this model, as
     /// its catalog (`/backend-api/codex/models` `service_tiers`) lists them.

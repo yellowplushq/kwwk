@@ -1434,8 +1434,12 @@ public final class OpenAIResponsesProvider:
                 // `summary: auto` opts into reasoning-summary deltas on the
                 // stream (`response.reasoning_summary_text.delta`). `.omit`
                 // drops the key entirely so the reasoning block streams as
-                // start → end with no body.
-                switch summary {
+                // start → end with no body. With no caller choice (so this
+                // branch is here for the effort) the model's
+                // `compat.reasoningSummaryDefault` picks the level: Copilot
+                // gpt-6.2-sol's `auto` summaries often come back blank, and
+                // `detailed` fills them (omp #20804).
+                switch summary ?? model.compat?.reasoningSummaryDefault {
                 case nil, .some(.auto): reasoning["summary"] = .string("auto")
                 case .some(.concise): reasoning["summary"] = .string("concise")
                 case .some(.detailed): reasoning["summary"] = .string("detailed")
